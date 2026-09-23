@@ -11,10 +11,10 @@ import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import io.github.sceneview.ar.ARSceneView
-import io.github.sceneview.ar.node.ArNode
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -37,6 +37,8 @@ class MainActivity : AppCompatActivity() {
     private var currentStepIdx = 0
     private var isBoxPlaced = false
     private var isUploading = false
+    private var lastFrame: Frame? = null
+    private var prismAnchor: Anchor? = null
 
     private val sequence = listOf(
         "front" to "1. Front (0° Level)",
@@ -68,6 +70,7 @@ class MainActivity : AppCompatActivity() {
 
         // 60 fps tracking loop
         sceneView.onSessionUpdated = { _, frame ->
+            lastFrame = frame
             onTrackingFrame(frame)
         }
 
@@ -79,17 +82,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun placePrismAtHitTest() {
-        val frame = sceneView.currentFrame ?: return
+        val frame = lastFrame ?: return
         val hitResults = frame.hitTest(sceneView.width / 2f, sceneView.height / 2f)
 
         val firstHit = hitResults.firstOrNull()
         if (firstHit != null) {
-            val anchor = firstHit.createAnchor()
-            val anchorNode = ArNode(sceneView.engine).apply {
-                this.anchor = anchor
-            }
-            sceneView.addChildNode(anchorNode)
-
+            prismAnchor = firstHit.createAnchor()
             isBoxPlaced = true
             actionButton.text = "CAPTURING RUN ACTIVE"
             actionButton.isEnabled = false
