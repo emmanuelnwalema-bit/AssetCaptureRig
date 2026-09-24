@@ -1,45 +1,243 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000">
 
+    <!-- AR Camera Viewport -->
     <io.github.sceneview.ar.ARSceneView
         android:id="@+id/arSceneView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <LinearLayout
+    <!-- Shutter Flash Effect -->
+    <View
+        android:id="@+id/snapFlash"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:padding="20dp">
+        android:background="#663FB950"
+        android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/statusText"
+    <!-- UI Overlay Layer -->
+    <RelativeLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="12dp">
+
+        <!-- Top Status Bar -->
+        <LinearLayout
+            android:id="@+id/topBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentTop="true"
+            android:orientation="horizontal"
+            android:baselineAligned="false">
+
+            <!-- Checklist Panel -->
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1.6"
+                android:background="#E60D1117"
+                android:padding="8dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/targetBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="1. FRONT (0° LEVEL)"
+                    android:textColor="#58A6FF"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:fontFamily="monospace" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/chkListLeft"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:textColor="#8B949E"
+                        android:textSize="8sp"
+                        android:fontFamily="monospace"
+                        android:lineSpacingExtra="2dp" />
+
+                    <TextView
+                        android:id="@+id/chkListRight"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:textColor="#8B949E"
+                        android:textSize="8sp"
+                        android:fontFamily="monospace"
+                        android:lineSpacingExtra="2dp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Telemetry Panel -->
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.9"
+                android:layout_marginStart="6dp"
+                android:background="#E60D1117"
+                android:padding="8dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/valDist"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DIST: --"
+                    android:textColor="#C9D1D9"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace" />
+
+                <TextView
+                    android:id="@+id/valAlign"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ALIGN: --"
+                    android:textColor="#C9D1D9"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace" />
+
+                <TextView
+                    android:id="@+id/valScale"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SCALE: 18x18"
+                    android:textColor="#58A6FF"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Collimation & Focus Gauge (Center Screen) -->
+        <LinearLayout
+            android:id="@+id/collimationGauge"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:background="#CC0D1117"
-            android:padding="12dp"
-            android:text="POINT PHONE AT TABLE SURFACE"
-            android:textColor="#58A6FF"
-            android:textSize="13sp"
-            android:fontFamily="monospace" />
+            android:layout_centerInParent="true"
+            android:background="#E6000000"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
+            android:orientation="vertical"
+            android:gravity="center">
 
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
+            <TextView
+                android:id="@+id/distIndicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="DISTANCE: -- cm"
+                android:textColor="#E3B341"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:fontFamily="monospace" />
 
-        <Button
-            android:id="@+id/actionButton"
+            <TextView
+                android:id="@+id/normalIndicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="ALIGNMENT: --°"
+                android:textColor="#F85149"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:fontFamily="monospace" />
+
+            <TextView
+                android:id="@+id/centerIndicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="CENTERING: --°"
+                android:textColor="#8B949E"
+                android:textSize="10sp"
+                android:fontFamily="monospace" />
+        </LinearLayout>
+
+        <!-- Bottom Controls -->
+        <LinearLayout
+            android:id="@+id/bottomControls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:backgroundTint="#238636"
-            android:text="LOCK PRISM ON TABLE"
-            android:textColor="#FFF"
-            android:fontFamily="monospace"
-            android:padding="16dp" />
-    </LinearLayout>
+            android:layout_alignParentBottom="true"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <!-- Scale Adjustment Bar -->
+            <LinearLayout
+                android:id="@+id/scaleBar"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:visibility="gone">
+
+                <Button
+                    android:id="@+id/btnScaleDown"
+                    android:layout_width="44dp"
+                    android:layout_height="36dp"
+                    android:backgroundTint="#21262D"
+                    android:text="－"
+                    android:textColor="#58A6FF"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/scaleReadout"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginHorizontal="12dp"
+                    android:text="PRISM: 18×18×14cm"
+                    android:textColor="#C9D1D9"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace" />
+
+                <Button
+                    android:id="@+id/btnScaleUp"
+                    android:layout_width="44dp"
+                    android:layout_height="36dp"
+                    android:backgroundTint="#21262D"
+                    android:text="＋"
+                    android:textColor="#58A6FF"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Force Snap Button -->
+            <Button
+                android:id="@+id/forceSnapBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:backgroundTint="#E3B341"
+                android:text="FORCE SNAP [FRONT]"
+                android:textColor="#0D1117"
+                android:fontFamily="monospace"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <!-- Primary Action Button -->
+            <Button
+                android:id="@+id/actionButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:backgroundTint="#238636"
+                android:text="LOCK PRISM ON TABLE"
+                android:textColor="#FFF"
+                android:fontFamily="monospace"
+                android:textStyle="bold"
+                android:padding="14dp" />
+        </LinearLayout>
+    </RelativeLayout>
 </FrameLayout>
