@@ -73,19 +73,25 @@ class MainActivity : AppCompatActivity() {
     private var prismDepth = 0.18f
     private var prismHeight = 0.14f
 
-    data class SequenceStep(val id: String, val label: String, val hint: String)
+    data class SequenceStep(
+        val id: String,
+        val label: String,
+        val hint: String,
+        val targetTilt: Int,
+        val targetOrbit: Int
+    )
 
     private val sequence = listOf(
-        SequenceStep("front", "1. FRONT (0° LEVEL)", "AIM LEVEL (0°) AT FRONT"),
-        SequenceStep("hero_3_4", "2. HERO SEED (45° / 30° TILT)", "ORBIT 45° & TILT 30° DOWN"),
-        SequenceStep("right", "3. RIGHT PROFILE (0° LEVEL)", "AIM LEVEL (0°) AT RIGHT"),
-        SequenceStep("back_r", "4. REAR-RIGHT (30° TILT)", "ORBIT 135° & TILT 30° DOWN"),
-        SequenceStep("back", "5. BACK VIEW (0° LEVEL)", "AIM LEVEL (0°) AT REAR"),
-        SequenceStep("back_l", "6. REAR-LEFT (30° TILT)", "ORBIT 225° & TILT 30° DOWN"),
-        SequenceStep("left", "7. LEFT PROFILE (0° LEVEL)", "AIM LEVEL (0°) AT LEFT"),
-        SequenceStep("front_l", "8. FRONT-LEFT (30° TILT)", "ORBIT 315° & TILT 30° DOWN"),
-        SequenceStep("top", "9. TOP OVERHEAD (90° DOWN)", "HOLD OVERHEAD LOOKING DOWN"),
-        SequenceStep("bottom", "10. UNDERSIDE (60° UP)", "AIM UPWARD AT ASSET BASE")
+        SequenceStep("front", "1. FRONT (0° LEVEL)", "AIM LEVEL AT FRONT", 0, 0),
+        SequenceStep("hero_3_4", "2. HERO SEED (45° / 30° TILT)", "ORBIT 45° & TILT 30° DOWN", 30, 45),
+        SequenceStep("right", "3. RIGHT PROFILE (0° LEVEL)", "AIM LEVEL AT RIGHT", 0, 90),
+        SequenceStep("back_r", "4. REAR-RIGHT (30° TILT)", "ORBIT 135° & TILT 30° DOWN", 30, 135),
+        SequenceStep("back", "5. BACK VIEW (0° LEVEL)", "AIM LEVEL AT REAR", 0, 180),
+        SequenceStep("back_l", "6. REAR-LEFT (30° TILT)", "ORBIT 225° & TILT 30° DOWN", 30, 225),
+        SequenceStep("left", "7. LEFT PROFILE (0° LEVEL)", "AIM LEVEL AT LEFT", 0, 270),
+        SequenceStep("front_l", "8. FRONT-LEFT (30° TILT)", "ORBIT 315° & TILT 30° DOWN", 30, 315),
+        SequenceStep("top", "9. TOP OVERHEAD (90° DOWN)", "HOLD OVERHEAD LOOKING DOWN", 90, 0),
+        SequenceStep("bottom", "10. UNDERSIDE (60° UP)", "AIM UPWARD AT ASSET BASE", -60, 0)
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,9 +122,7 @@ class MainActivity : AppCompatActivity() {
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (e: Exception) {
-            // Audio optional
-        }
+        } catch (_: Exception) {}
 
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
@@ -191,6 +195,7 @@ class MainActivity : AppCompatActivity() {
             val anchor = firstHit.createAnchor()
             prismAnchor = anchor
 
+            // Compute yaw azimuth so facet 0 (Front) directly faces the phone on placement
             val camPose = frame.camera.pose
             val anchorPose = anchor.pose
             val dx = camPose.tx() - anchorPose.tx()
@@ -198,6 +203,16 @@ class MainActivity : AppCompatActivity() {
             initialAzimuth = atan2(dx, dz)
 
             isBoxPlaced = true
+
+            // Disable plane renderer and stop searching for planes to eliminate white dots and drift
+            sceneView.planeRenderer.isEnabled = false
+            sceneView.planeRenderer.isVisible = false
+            sceneView.session?.let { session ->
+                val config = session.config
+                config.planeFindingMode = Config.PlaneFindingMode.DISABLED
+                session.configure(config)
+            }
+
             actionButton.visibility = View.GONE
             scaleBar.visibility = View.VISIBLE
             forceSnapBtn.visibility = View.VISIBLE
@@ -234,6 +249,7 @@ class MainActivity : AppCompatActivity() {
         val anchor = prismAnchor ?: return
         val anchorPose = anchor.pose
         val camPose = camera.pose
+        val step = sequence[currentStepIdx]
 
         val desc = getFacetDescriptor(currentStepIdx)
         val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
@@ -247,13 +263,27 @@ class MainActivity : AppCompatActivity() {
         val distCm = distMeters * 100f
         val isDistanceOptimal = distCm in 20.0f..38.0f
 
-        // 2. Collimation Angle (Optical Ray vs Facet Normal)
+        // Optical forward vector (-Z in ARCore camera space)
         val camForward = floatArrayOf(-camPose.zAxis[0], -camPose.zAxis[1], -camPose.zAxis[2])
+
+        // 2. Camera Tilt Angle (Pitch relative to horizontal)
+        // camForward[1] < 0 means aiming downwards (positive tilt)
+        val actualTiltDeg = Math.toDegrees(asin((-camForward[1]).coerceIn(-1.0f, 1.0f).toDouble())).roundToInt()
+
+        // 3. Camera Orbit Azimuth relative to asset front
+        val camDx = camPose.tx() - anchorPose.tx()
+        val camDz = camPose.tz() - anchorPose.tz()
+        var actualOrbitDeg = Math.toDegrees(atan2(camDx.toDouble(), camDz.toDouble())).toFloat() - Math.toDegrees(initialAzimuth.toDouble()).toFloat()
+        while (actualOrbitDeg < 0) actualOrbitDeg += 360f
+        while (actualOrbitDeg >= 360) actualOrbitDeg -= 360f
+        val actualOrbitRound = actualOrbitDeg.roundToInt()
+
+        // 4. Collimation Alignment Error (Optical Ray vs Facet Normal)
         val dotNormal = -(camForward[0] * faceNormalWorld[0] + camForward[1] * faceNormalWorld[1] + camForward[2] * faceNormalWorld[2])
         val normAngleErr = Math.toDegrees(acos(dotNormal.coerceIn(-1.0f, 1.0f).toDouble())).toFloat()
         val isNormalAligned = normAngleErr <= 10.0f
 
-        // 3. Centering Angle
+        // 5. Centering Angle (Camera Forward pointing directly at Facet Center)
         val safeDist = if (distMeters > 0.001f) distMeters else 1.0f
         val toFaceDirX = toFaceVecX / safeDist
         val toFaceDirY = toFaceVecY / safeDist
@@ -266,8 +296,9 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             valDist.text = "DIST: ${distCm.roundToInt()}cm"
-            valAlign.text = String.format(Locale.US, "ALIGN: %.1f°", normAngleErr)
+            valAlign.text = "TILT: ${actualTiltDeg}° [${step.targetTilt}°]"
 
+            // Top Gauge: Focus Distance
             if (distCm < 20f) {
                 distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
                 distIndicator.setTextColor(Color.parseColor("#F85149"))
@@ -279,19 +310,21 @@ class MainActivity : AppCompatActivity() {
                 distIndicator.setTextColor(Color.parseColor("#3FB950"))
             }
 
+            // Middle Gauge: Angle Synchronized Readout
             if (isNormalAligned) {
-                normalIndicator.text = String.format(Locale.US, "ALIGNMENT: %.1f° (LOCKED)", normAngleErr)
+                normalIndicator.text = "TILT: ${actualTiltDeg}° | ORBIT: ${actualOrbitRound}° (LOCKED)"
                 normalIndicator.setTextColor(Color.parseColor("#3FB950"))
             } else {
-                normalIndicator.text = String.format(Locale.US, "OFF-AXIS: %.1f° (%s)", normAngleErr, sequence[currentStepIdx].hint)
+                normalIndicator.text = "TILT: ${actualTiltDeg}° [AIM ${step.targetTilt}°] | DEV: ${String.format(Locale.US, "%.1f", normAngleErr)}°"
                 normalIndicator.setTextColor(Color.parseColor("#F85149"))
             }
 
+            // Bottom Gauge: Centering Status
             if (isCentered) {
-                centerIndicator.text = String.format(Locale.US, "CENTERING: %.1f° (CENTERED)", centAngleErr)
+                centerIndicator.text = "BULLSEYE CENTERED (OFFSET: ${String.format(Locale.US, "%.1f", centAngleErr)}°)"
                 centerIndicator.setTextColor(Color.parseColor("#3FB950"))
             } else {
-                centerIndicator.text = String.format(Locale.US, "CENTERING: %.1f° (FRAME BULLSEYE)", centAngleErr)
+                centerIndicator.text = "AIM AT RETICLE (OFFSET: ${String.format(Locale.US, "%.1f", centAngleErr)}°)"
                 centerIndicator.setTextColor(Color.parseColor("#8B949E"))
             }
         }
@@ -336,9 +369,7 @@ class MainActivity : AppCompatActivity() {
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (e: Exception) {
-            // Optional feedback
-        }
+        } catch (_: Exception) {}
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -427,13 +458,14 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(nx * c + nz * s, ny, -nx * s + nz * c)
     }
 
+    // Uses ARCore's full 6DoF anchor pose to prevent coordinate drift
     private fun localToWorld(lx: Float, ly: Float, lz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
         val c = cos(initialAzimuth)
         val s = sin(initialAzimuth)
         val rx = lx * c + lz * s
         val ry = ly
         val rz = -lx * s + lz * c
-        return floatArrayOf(anchorPose.tx() + rx, anchorPose.ty() + ry, anchorPose.tz() + rz)
+        return anchorPose.transformPoint(floatArrayOf(rx, ry, rz))
     }
 
     inner class PrismOverlayView(context: Context) : View(context) {
@@ -450,13 +482,20 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.FILL
         }
 
+        // Substantially enlarged and thickened reticle paints
         private val reticlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 5f
+            strokeWidth = 7f
         }
 
         private val fillReticlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
+        }
+
+        private val screenCenterGuidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(120, 255, 255, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
         }
 
         private val viewMatrix = FloatArray(16)
@@ -484,8 +523,8 @@ class MainActivity : AppCompatActivity() {
                     val p = projectPoint(hit.hitPose.tx(), hit.hitPose.ty(), hit.hitPose.tz(), screenW, screenH)
                     if (p != null) {
                         reticlePaint.color = Color.parseColor("#58A6FF")
-                        canvas.drawCircle(p.x, p.y, 45f, reticlePaint)
-                        canvas.drawCircle(p.x, p.y, 15f, reticlePaint)
+                        canvas.drawCircle(p.x, p.y, 60f, reticlePaint)
+                        canvas.drawCircle(p.x, p.y, 20f, reticlePaint)
                     }
                 }
                 return
@@ -493,6 +532,10 @@ class MainActivity : AppCompatActivity() {
 
             val anchor = prismAnchor ?: return
             val anchorPose = anchor.pose
+
+            // Subtle Screen-Center Reticle Guide
+            canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, screenCenterGuidePaint)
+            canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, screenCenterGuidePaint)
 
             // 2. Build 3D compound geometry vertices
             val hW = prismWidth / 2f
@@ -597,7 +640,7 @@ class MainActivity : AppCompatActivity() {
                     canvas.drawPath(path, facetPaint)
                 }
 
-                // 5. Draw 3D Face Reticle on Active Target Center
+                // 5. Draw Enlarged 3D Face Reticle on Active Target Center
                 val desc = getFacetDescriptor(currentStepIdx)
                 val centerWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
                 val reticlePt = projectPoint(centerWorld, screenW, screenH)
@@ -607,10 +650,11 @@ class MainActivity : AppCompatActivity() {
                     reticlePaint.color = reticleColor
                     fillReticlePaint.color = reticleColor
 
-                    canvas.drawCircle(reticlePt.x, reticlePt.y, 32f, reticlePaint)
-                    canvas.drawCircle(reticlePt.x, reticlePt.y, 8f, fillReticlePaint)
-                    canvas.drawLine(reticlePt.x - 45f, reticlePt.y, reticlePt.x + 45f, reticlePt.y, reticlePaint)
-                    canvas.drawLine(reticlePt.x, reticlePt.y - 45f, reticlePt.x, reticlePt.y + 45f, reticlePaint)
+                    // Prominent target bullseye and extended crosshairs
+                    canvas.drawCircle(reticlePt.x, reticlePt.y, 70f, reticlePaint)
+                    canvas.drawCircle(reticlePt.x, reticlePt.y, 16f, fillReticlePaint)
+                    canvas.drawLine(reticlePt.x - 95f, reticlePt.y, reticlePt.x + 95f, reticlePt.y, reticlePaint)
+                    canvas.drawLine(reticlePt.x, reticlePt.y - 95f, reticlePt.x, reticlePt.y + 95f, reticlePaint)
                 }
             }
         }
