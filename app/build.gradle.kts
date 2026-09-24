@@ -8,7 +8,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.assetcapturerig"
+        applicationId = "com.example.assetcapturerig.v2"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
