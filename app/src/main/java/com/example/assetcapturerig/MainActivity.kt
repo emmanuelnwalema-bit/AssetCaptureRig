@@ -29,6 +29,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.Locale
 import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
@@ -115,9 +116,10 @@ class MainActivity : AppCompatActivity() {
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // Audio optional
+        }
 
-        // Add 3D Prism Overlay directly above ARSceneView
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
 
@@ -189,7 +191,6 @@ class MainActivity : AppCompatActivity() {
             val anchor = firstHit.createAnchor()
             prismAnchor = anchor
 
-            // Compute yaw azimuth so facet 0 (Front) directly faces the phone on placement
             val camPose = frame.camera.pose
             val anchorPose = anchor.pose
             val dx = camPose.tx() - anchorPose.tx()
@@ -200,7 +201,7 @@ class MainActivity : AppCompatActivity() {
             actionButton.visibility = View.GONE
             scaleBar.visibility = View.VISIBLE
             forceSnapBtn.visibility = View.VISIBLE
-            forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase()}]"
+            forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
             targetBadge.text = sequence[currentStepIdx].label
             updateChecklistUI()
             overlayView.postInvalidate()
@@ -239,12 +240,10 @@ class MainActivity : AppCompatActivity() {
         val faceNormalWorld = rotateNormalByAzimuth(desc.normX, desc.normY, desc.normZ)
 
         // 1. Focal Distance
-        val toFaceVec = floatArrayOf(
-            faceCenterWorld[0] - camPose.tx(),
-            faceCenterWorld[1] - camPose.ty(),
-            faceCenterWorld[2] - camPose.tz()
-        )
-        val distMeters = sqrt(toFaceVec[0].pow(2) + toFaceVec[1].pow(2) + toFaceVec[2].pow(2))
+        val toFaceVecX = faceCenterWorld[0] - camPose.tx()
+        val toFaceVecY = faceCenterWorld[1] - camPose.ty()
+        val toFaceVecZ = faceCenterWorld[2] - camPose.tz()
+        val distMeters = sqrt(toFaceVecX * toFaceVecX + toFaceVecY * toFaceVecY + toFaceVecZ * toFaceVecZ)
         val distCm = distMeters * 100f
         val isDistanceOptimal = distCm in 20.0f..38.0f
 
@@ -255,8 +254,11 @@ class MainActivity : AppCompatActivity() {
         val isNormalAligned = normAngleErr <= 10.0f
 
         // 3. Centering Angle
-        val toFaceDir = floatArrayOf(toFaceVec[0] / distMeters, toFaceVec[1] / distMeters, toFaceVec[2] / distMeters)
-        val dotCenter = camForward[0] * toFaceDir[0] + camForward[1] * toFaceDir[1] + camForward[2] * toFaceDir[2]
+        val safeDist = if (distMeters > 0.001f) distMeters else 1.0f
+        val toFaceDirX = toFaceVecX / safeDist
+        val toFaceDirY = toFaceVecY / safeDist
+        val toFaceDirZ = toFaceVecZ / safeDist
+        val dotCenter = camForward[0] * toFaceDirX + camForward[1] * toFaceDirY + camForward[2] * toFaceDirZ
         val centAngleErr = Math.toDegrees(acos(dotCenter.coerceIn(-1.0f, 1.0f).toDouble())).toFloat()
         val isCentered = centAngleErr <= 12.0f
 
@@ -264,7 +266,7 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             valDist.text = "DIST: ${distCm.roundToInt()}cm"
-            valAlign.text = "ALIGN: ${String.format("%.1f", normAngleErr)}°"
+            valAlign.text = String.format(Locale.US, "ALIGN: %.1f°", normAngleErr)
 
             if (distCm < 20f) {
                 distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
@@ -278,23 +280,22 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (isNormalAligned) {
-                normalIndicator.text = "ALIGNMENT: ${String.format("%.1f", normAngleErr)}° (LOCKED)"
+                normalIndicator.text = String.format(Locale.US, "ALIGNMENT: %.1f° (LOCKED)", normAngleErr)
                 normalIndicator.setTextColor(Color.parseColor("#3FB950"))
             } else {
-                normalIndicator.text = "OFF-AXIS: ${String.format("%.1f", normAngleErr)}° (${sequence[currentStepIdx].hint})"
+                normalIndicator.text = String.format(Locale.US, "OFF-AXIS: %.1f° (%s)", normAngleErr, sequence[currentStepIdx].hint)
                 normalIndicator.setTextColor(Color.parseColor("#F85149"))
             }
 
             if (isCentered) {
-                centerIndicator.text = "CENTERING: ${String.format("%.1f", centAngleErr)}° (CENTERED)"
+                centerIndicator.text = String.format(Locale.US, "CENTERING: %.1f° (CENTERED)", centAngleErr)
                 centerIndicator.setTextColor(Color.parseColor("#3FB950"))
             } else {
-                centerIndicator.text = "CENTERING: ${String.format("%.1f", centAngleErr)}° (FRAME BULLSEYE)"
+                centerIndicator.text = String.format(Locale.US, "CENTERING: %.1f° (FRAME BULLSEYE)", centAngleErr)
                 centerIndicator.setTextColor(Color.parseColor("#8B949E"))
             }
         }
 
-        // 450ms alignment dwell interlock
         if (isReadyToCapture) {
             overlayView.isAligned = true
             val now = System.currentTimeMillis()
@@ -335,7 +336,9 @@ class MainActivity : AppCompatActivity() {
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // Optional feedback
+        }
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -383,7 +386,7 @@ class MainActivity : AppCompatActivity() {
                         scaleBar.visibility = View.GONE
                     } else {
                         targetBadge.text = sequence[currentStepIdx].label
-                        forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase()}]"
+                        forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
                     }
                     overlayView.postInvalidate()
                 }
@@ -391,7 +394,6 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    // Geometry & math routines
     data class FacetDesc(
         val centerX: Float, val centerY: Float, val centerZ: Float,
         val normX: Float, val normY: Float, val normZ: Float
@@ -434,7 +436,6 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(anchorPose.tx() + rx, anchorPose.ty() + ry, anchorPose.tz() + rz)
     }
 
-    // Custom 2D HUD projection layer
     inner class PrismOverlayView(context: Context) : View(context) {
 
         var isAligned = false
@@ -618,6 +619,10 @@ class MainActivity : AppCompatActivity() {
             if (p1 != null && p2 != null) {
                 canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
             }
+        }
+
+        private fun projectPoint(x: Float, y: Float, z: Float, screenW: Float, screenH: Float): PointF? {
+            return projectPoint(floatArrayOf(x, y, z), screenW, screenH)
         }
 
         private fun projectPoint(worldCoords: FloatArray, screenW: Float, screenH: Float): PointF? {
