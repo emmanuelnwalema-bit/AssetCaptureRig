@@ -122,7 +122,7 @@ class MainActivity : AppCompatActivity() {
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
 
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
@@ -195,7 +195,6 @@ class MainActivity : AppCompatActivity() {
             val anchor = firstHit.createAnchor()
             prismAnchor = anchor
 
-            // Compute yaw azimuth so facet 0 (Front) directly faces the phone on placement
             val camPose = frame.camera.pose
             val anchorPose = anchor.pose
             val dx = camPose.tx() - anchorPose.tx()
@@ -204,7 +203,6 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
-            // Disable plane renderer and stop searching for planes to eliminate white dots and drift
             sceneView.planeRenderer.isEnabled = false
             sceneView.planeRenderer.isVisible = false
             sceneView.session?.let { session ->
@@ -255,7 +253,14 @@ class MainActivity : AppCompatActivity() {
         val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
         val faceNormalWorld = rotateNormalByAzimuth(desc.normX, desc.normY, desc.normZ)
 
-        // 1. Focal Distance
+        // 1. Facing test (Backface Culling)
+        val camToFaceX = camPose.tx() - faceCenterWorld[0]
+        val camToFaceY = camPose.ty() - faceCenterWorld[1]
+        val camToFaceZ = camPose.tz() - faceCenterWorld[2]
+        val facingDot = camToFaceX * faceNormalWorld[0] + camToFaceY * faceNormalWorld[1] + camToFaceZ * faceNormalWorld[2]
+        val isFacingCamera = facingDot > 0.001f
+
+        // 2. Focal Distance
         val toFaceVecX = faceCenterWorld[0] - camPose.tx()
         val toFaceVecY = faceCenterWorld[1] - camPose.ty()
         val toFaceVecZ = faceCenterWorld[2] - camPose.tz()
@@ -263,34 +268,22 @@ class MainActivity : AppCompatActivity() {
         val distCm = distMeters * 100f
         val isDistanceOptimal = distCm in 20.0f..38.0f
 
-        // Optical forward vector (-Z in ARCore camera space)
         val camForward = floatArrayOf(-camPose.zAxis[0], -camPose.zAxis[1], -camPose.zAxis[2])
-
-        // 2. Camera Tilt Angle (Pitch relative to horizontal)
-        // camForward[1] < 0 means aiming downwards (positive tilt)
         val actualTiltDeg = Math.toDegrees(asin((-camForward[1]).coerceIn(-1.0f, 1.0f).toDouble())).roundToInt()
 
-        // 3. Camera Orbit Azimuth relative to asset front
-        val camDx = camPose.tx() - anchorPose.tx()
-        val camDz = camPose.tz() - anchorPose.tz()
-        var actualOrbitDeg = Math.toDegrees(atan2(camDx.toDouble(), camDz.toDouble())).toFloat() - Math.toDegrees(initialAzimuth.toDouble()).toFloat()
-        while (actualOrbitDeg < 0) actualOrbitDeg += 360f
-        while (actualOrbitDeg >= 360) actualOrbitDeg -= 360f
-        val actualOrbitRound = actualOrbitDeg.roundToInt()
-
-        // 4. Collimation Alignment Error (Optical Ray vs Facet Normal)
+        // 3. Collimation Alignment Angle
         val dotNormal = -(camForward[0] * faceNormalWorld[0] + camForward[1] * faceNormalWorld[1] + camForward[2] * faceNormalWorld[2])
         val normAngleErr = Math.toDegrees(acos(dotNormal.coerceIn(-1.0f, 1.0f).toDouble())).toFloat()
-        val isNormalAligned = normAngleErr <= 10.0f
+        val isNormalAligned = isFacingCamera && (normAngleErr <= 10.0f)
 
-        // 5. Centering Angle (Camera Forward pointing directly at Facet Center)
+        // 4. Centering Angle
         val safeDist = if (distMeters > 0.001f) distMeters else 1.0f
         val toFaceDirX = toFaceVecX / safeDist
         val toFaceDirY = toFaceVecY / safeDist
         val toFaceDirZ = toFaceVecZ / safeDist
         val dotCenter = camForward[0] * toFaceDirX + camForward[1] * toFaceDirY + camForward[2] * toFaceDirZ
         val centAngleErr = Math.toDegrees(acos(dotCenter.coerceIn(-1.0f, 1.0f).toDouble())).toFloat()
-        val isCentered = centAngleErr <= 12.0f
+        val isCentered = isFacingCamera && (centAngleErr <= 12.0f)
 
         val isReadyToCapture = isNormalAligned && isCentered && isDistanceOptimal
 
@@ -298,7 +291,6 @@ class MainActivity : AppCompatActivity() {
             valDist.text = "DIST: ${distCm.roundToInt()}cm"
             valAlign.text = "TILT: ${actualTiltDeg}° [${step.targetTilt}°]"
 
-            // Top Gauge: Focus Distance
             if (distCm < 20f) {
                 distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
                 distIndicator.setTextColor(Color.parseColor("#F85149"))
@@ -310,22 +302,27 @@ class MainActivity : AppCompatActivity() {
                 distIndicator.setTextColor(Color.parseColor("#3FB950"))
             }
 
-            // Middle Gauge: Angle Synchronized Readout
-            if (isNormalAligned) {
-                normalIndicator.text = "TILT: ${actualTiltDeg}° | ORBIT: ${actualOrbitRound}° (LOCKED)"
-                normalIndicator.setTextColor(Color.parseColor("#3FB950"))
-            } else {
-                normalIndicator.text = "TILT: ${actualTiltDeg}° [AIM ${step.targetTilt}°] | DEV: ${String.format(Locale.US, "%.1f", normAngleErr)}°"
+            if (!isFacingCamera) {
+                normalIndicator.text = "MOVE TO FRONT OF ${step.label}"
                 normalIndicator.setTextColor(Color.parseColor("#F85149"))
-            }
-
-            // Bottom Gauge: Centering Status
-            if (isCentered) {
-                centerIndicator.text = "BULLSEYE CENTERED (OFFSET: ${String.format(Locale.US, "%.1f", centAngleErr)}°)"
-                centerIndicator.setTextColor(Color.parseColor("#3FB950"))
-            } else {
-                centerIndicator.text = "AIM AT RETICLE (OFFSET: ${String.format(Locale.US, "%.1f", centAngleErr)}°)"
+                centerIndicator.text = "FACET FACING AWAY"
                 centerIndicator.setTextColor(Color.parseColor("#8B949E"))
+            } else {
+                if (isNormalAligned) {
+                    normalIndicator.text = "TILT: ${actualTiltDeg}° | ALIGN: ${String.format(Locale.US, "%.1f", normAngleErr)}° (LOCKED)"
+                    normalIndicator.setTextColor(Color.parseColor("#3FB950"))
+                } else {
+                    normalIndicator.text = "TILT: ${actualTiltDeg}° [AIM ${step.targetTilt}°] | DEV: ${String.format(Locale.US, "%.1f", normAngleErr)}°"
+                    normalIndicator.setTextColor(Color.parseColor("#F85149"))
+                }
+
+                if (isCentered) {
+                    centerIndicator.text = "BULLSEYE CENTERED (OFFSET: ${String.format(Locale.US, "%.1f", centAngleErr)}°)"
+                    centerIndicator.setTextColor(Color.parseColor("#3FB950"))
+                } else {
+                    centerIndicator.text = "AIM AT RETICLE (OFFSET: ${String.format(Locale.US, "%.1f", centAngleErr)}°)"
+                    centerIndicator.setTextColor(Color.parseColor("#8B949E"))
+                }
             }
         }
 
@@ -369,7 +366,7 @@ class MainActivity : AppCompatActivity() {
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -458,14 +455,14 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(nx * c + nz * s, ny, -nx * s + nz * c)
     }
 
-    // Uses ARCore's full 6DoF anchor pose to prevent coordinate drift
+    // Unified gravity-aligned transformation matching normal calculation
     private fun localToWorld(lx: Float, ly: Float, lz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
         val c = cos(initialAzimuth)
         val s = sin(initialAzimuth)
         val rx = lx * c + lz * s
         val ry = ly
         val rz = -lx * s + lz * c
-        return anchorPose.transformPoint(floatArrayOf(rx, ry, rz))
+        return floatArrayOf(anchorPose.tx() + rx, anchorPose.ty() + ry, anchorPose.tz() + rz)
     }
 
     inner class PrismOverlayView(context: Context) : View(context) {
@@ -482,10 +479,9 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.FILL
         }
 
-        // Substantially enlarged and thickened reticle paints
         private val reticlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 7f
+            strokeWidth = 6f
         }
 
         private val fillReticlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -493,7 +489,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         private val screenCenterGuidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(120, 255, 255, 255)
+            color = Color.argb(130, 255, 255, 255)
             style = Paint.Style.STROKE
             strokeWidth = 3f
         }
@@ -515,7 +511,6 @@ class MainActivity : AppCompatActivity() {
             val screenW = width.toFloat()
             val screenH = height.toFloat()
 
-            // 1. Draw Surface Reticle Before Lock
             if (!isBoxPlaced) {
                 val hitResults = frame.hitTest(screenW / 2f, screenH / 2f)
                 val hit = hitResults.firstOrNull()
@@ -533,11 +528,10 @@ class MainActivity : AppCompatActivity() {
             val anchor = prismAnchor ?: return
             val anchorPose = anchor.pose
 
-            // Subtle Screen-Center Reticle Guide
+            // Screen-Center Reticle Guide
             canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, screenCenterGuidePaint)
             canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, screenCenterGuidePaint)
 
-            // 2. Build 3D compound geometry vertices
             val hW = prismWidth / 2f
             val hD = prismDepth / 2f
             val c = min(hW, hD) * 0.35f
@@ -579,89 +573,136 @@ class MainActivity : AppCompatActivity() {
             val topPts = topLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
             val cornerPts = topCornersLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
 
-            // 3. Draw Octagonal Wireframe Cage
+            // Wireframe
             for (i in 0 until 8) {
                 val next = (i + 1) % 8
-                drawEdge(canvas, botPts[i], botPts[next])
+                drawEdge(canvas, botPts[i], botPts[next], wirePaint)
             }
-            // Vertical Walls
-            drawEdge(canvas, botPts[1], topPts[1])
-            drawEdge(canvas, botPts[0], topPts[0])
-            drawEdge(canvas, topPts[1], topPts[0])
+            drawEdge(canvas, botPts[1], topPts[1], wirePaint)
+            drawEdge(canvas, botPts[0], topPts[0], wirePaint)
+            drawEdge(canvas, topPts[1], topPts[0], wirePaint)
 
-            drawEdge(canvas, botPts[7], topPts[7])
-            drawEdge(canvas, botPts[6], topPts[6])
-            drawEdge(canvas, topPts[7], topPts[6])
+            drawEdge(canvas, botPts[7], topPts[7], wirePaint)
+            drawEdge(canvas, botPts[6], topPts[6], wirePaint)
+            drawEdge(canvas, topPts[7], topPts[6], wirePaint)
 
-            drawEdge(canvas, botPts[5], topPts[5])
-            drawEdge(canvas, botPts[4], topPts[4])
-            drawEdge(canvas, topPts[5], topPts[4])
+            drawEdge(canvas, botPts[5], topPts[5], wirePaint)
+            drawEdge(canvas, botPts[4], topPts[4], wirePaint)
+            drawEdge(canvas, topPts[5], topPts[4], wirePaint)
 
-            drawEdge(canvas, botPts[3], topPts[3])
-            drawEdge(canvas, botPts[2], topPts[2])
-            drawEdge(canvas, topPts[3], topPts[2])
+            drawEdge(canvas, botPts[3], topPts[3], wirePaint)
+            drawEdge(canvas, botPts[2], topPts[2], wirePaint)
+            drawEdge(canvas, topPts[3], topPts[2], wirePaint)
 
-            // Slanted Corner Chamfers
-            drawEdge(canvas, botPts[0], cornerPts[0])
-            drawEdge(canvas, botPts[7], cornerPts[0])
-            drawEdge(canvas, botPts[6], cornerPts[3])
-            drawEdge(canvas, botPts[5], cornerPts[3])
-            drawEdge(canvas, botPts[4], cornerPts[2])
-            drawEdge(canvas, botPts[3], cornerPts[2])
-            drawEdge(canvas, botPts[2], cornerPts[1])
-            drawEdge(canvas, botPts[1], cornerPts[1])
+            drawEdge(canvas, botPts[0], cornerPts[0], wirePaint)
+            drawEdge(canvas, botPts[7], cornerPts[0], wirePaint)
+            drawEdge(canvas, botPts[6], cornerPts[3], wirePaint)
+            drawEdge(canvas, botPts[5], cornerPts[3], wirePaint)
+            drawEdge(canvas, botPts[4], cornerPts[2], wirePaint)
+            drawEdge(canvas, botPts[3], cornerPts[2], wirePaint)
+            drawEdge(canvas, botPts[2], cornerPts[1], wirePaint)
+            drawEdge(canvas, botPts[1], cornerPts[1], wirePaint)
 
-            // 4. Highlight Active Target Facet
+            // Facet and 3D Reticle
             if (currentStepIdx < sequence.size) {
-                val activeColor = if (isAligned) Color.parseColor("#803FB950") else Color.parseColor("#5058A6FF")
-                facetPaint.color = activeColor
-
-                val facetPoly = when (currentStepIdx) {
-                    0 -> listOf(botPts[1], botPts[0], topPts[0], topPts[1])
-                    1 -> listOf(botPts[0], botPts[7], cornerPts[0])
-                    2 -> listOf(botPts[7], botPts[6], topPts[6], topPts[7])
-                    3 -> listOf(botPts[6], botPts[5], cornerPts[3])
-                    4 -> listOf(botPts[5], botPts[4], topPts[4], topPts[5])
-                    5 -> listOf(botPts[4], botPts[3], cornerPts[2])
-                    6 -> listOf(botPts[3], botPts[2], topPts[2], topPts[3])
-                    7 -> listOf(botPts[2], botPts[1], cornerPts[1])
-                    8 -> listOf(topPts[0], topPts[2], topPts[4], topPts[6])
-                    else -> listOf(botPts[0], botPts[2], botPts[4], botPts[6])
-                }
-
-                if (facetPoly.all { it != null }) {
-                    val path = Path().apply {
-                        moveTo(facetPoly[0]!!.x, facetPoly[0]!!.y)
-                        for (idx in 1 until facetPoly.size) {
-                            lineTo(facetPoly[idx]!!.x, facetPoly[idx]!!.y)
-                        }
-                        close()
-                    }
-                    canvas.drawPath(path, facetPaint)
-                }
-
-                // 5. Draw Enlarged 3D Face Reticle on Active Target Center
                 val desc = getFacetDescriptor(currentStepIdx)
-                val centerWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
-                val reticlePt = projectPoint(centerWorld, screenW, screenH)
+                val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
+                val faceNormalWorld = rotateNormalByAzimuth(desc.normX, desc.normY, desc.normZ)
 
-                if (reticlePt != null) {
-                    val reticleColor = if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#58A6FF")
-                    reticlePaint.color = reticleColor
-                    fillReticlePaint.color = reticleColor
+                val camPose = camera.pose
+                val camToFaceX = camPose.tx() - faceCenterWorld[0]
+                val camToFaceY = camPose.ty() - faceCenterWorld[1]
+                val camToFaceZ = camPose.tz() - faceCenterWorld[2]
+                val facingDot = camToFaceX * faceNormalWorld[0] + camToFaceY * faceNormalWorld[1] + camToFaceZ * faceNormalWorld[2]
+                val isFacing = facingDot > 0.001f
 
-                    // Prominent target bullseye and extended crosshairs
-                    canvas.drawCircle(reticlePt.x, reticlePt.y, 70f, reticlePaint)
-                    canvas.drawCircle(reticlePt.x, reticlePt.y, 16f, fillReticlePaint)
-                    canvas.drawLine(reticlePt.x - 95f, reticlePt.y, reticlePt.x + 95f, reticlePt.y, reticlePaint)
-                    canvas.drawLine(reticlePt.x, reticlePt.y - 95f, reticlePt.x, reticlePt.y + 95f, reticlePaint)
+                if (isFacing) {
+                    facetPaint.color = if (isAligned) Color.parseColor("#803FB950") else Color.parseColor("#4558A6FF")
+
+                    val facetPoly = when (currentStepIdx) {
+                        0 -> listOf(botPts[1], botPts[0], topPts[0], topPts[1])
+                        1 -> listOf(botPts[0], botPts[7], cornerPts[0])
+                        2 -> listOf(botPts[7], botPts[6], topPts[6], topPts[7])
+                        3 -> listOf(botPts[6], botPts[5], cornerPts[3])
+                        4 -> listOf(botPts[5], botPts[4], topPts[4], topPts[5])
+                        5 -> listOf(botPts[4], botPts[3], cornerPts[2])
+                        6 -> listOf(botPts[3], botPts[2], topPts[2], topPts[3])
+                        7 -> listOf(botPts[2], botPts[1], cornerPts[1])
+                        8 -> listOf(topPts[0], topPts[2], topPts[4], topPts[6])
+                        else -> listOf(botPts[0], botPts[2], botPts[4], botPts[6])
+                    }
+
+                    if (facetPoly.all { it != null }) {
+                        val path = Path().apply {
+                            moveTo(facetPoly[0]!!.x, facetPoly[0]!!.y)
+                            for (idx in 1 until facetPoly.size) {
+                                lineTo(facetPoly[idx]!!.x, facetPoly[idx]!!.y)
+                            }
+                            close()
+                        }
+                        canvas.drawPath(path, facetPaint)
+                    }
+
+                    // Compute local tangent axes for true planar reticle
+                    val nx = desc.normX
+                    val ny = desc.normY
+                    val nz = desc.normZ
+                    val ux: Float
+                    val uy: Float
+                    val uz: Float
+
+                    if (abs(ny) > 0.95f) {
+                        ux = 1f; uy = 0f; uz = 0f
+                    } else {
+                        val len = sqrt(nz * nz + nx * nx)
+                        ux = nz / len; uy = 0f; uz = -nx / len
+                    }
+                    val vx = ny * uz - nz * uy
+                    val vy = nz * ux - nx * uz
+                    val vz = nx * uy - ny * ux
+
+                    val rColor = if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#58A6FF")
+                    reticlePaint.color = rColor
+                    fillReticlePaint.color = rColor
+
+                    val radius = min(prismWidth, prismDepth) * 0.22f
+
+                    // 3D Circular Ring lying flat on facet
+                    val ringPts = mutableListOf<PointF?>()
+                    for (i in 0 until 16) {
+                        val angle = (2.0 * Math.PI * i / 16).toFloat()
+                        val px = desc.centerX + radius * (cos(angle) * ux + sin(angle) * vx) + nx * 0.003f
+                        val py = desc.centerY + radius * (cos(angle) * uy + sin(angle) * vy) + ny * 0.003f
+                        val pz = desc.centerZ + radius * (cos(angle) * uz + sin(angle) * vz) + nz * 0.003f
+                        ringPts.add(projectPoint(localToWorld(px, py, pz, anchorPose), screenW, screenH))
+                    }
+                    for (i in 0 until 16) {
+                        val next = (i + 1) % 16
+                        drawEdge(canvas, ringPts[i], ringPts[next], reticlePaint)
+                    }
+
+                    // 3D Crosshairs in Facet Plane
+                    val ch = radius * 1.5f
+                    val h1 = projectPoint(localToWorld(desc.centerX - ux * ch + nx * 0.003f, desc.centerY - uy * ch + ny * 0.003f, desc.centerZ - uz * ch + nz * 0.003f, anchorPose), screenW, screenH)
+                    val h2 = projectPoint(localToWorld(desc.centerX + ux * ch + nx * 0.003f, desc.centerY + uy * ch + ny * 0.003f, desc.centerZ + uz * ch + nz * 0.003f, anchorPose), screenW, screenH)
+                    drawEdge(canvas, h1, h2, reticlePaint)
+
+                    val v1 = projectPoint(localToWorld(desc.centerX - vx * ch + nx * 0.003f, desc.centerY - vy * ch + ny * 0.003f, desc.centerZ - vz * ch + nz * 0.003f, anchorPose), screenW, screenH)
+                    val v2 = projectPoint(localToWorld(desc.centerX + vx * ch + nx * 0.003f, desc.centerY + vy * ch + ny * 0.003f, desc.centerZ + vz * ch + nz * 0.003f, anchorPose), screenW, screenH)
+                    drawEdge(canvas, v1, v2, reticlePaint)
+
+                    // 3D Center Pip
+                    val centerPt = projectPoint(localToWorld(desc.centerX + nx * 0.003f, desc.centerY + ny * 0.003f, desc.centerZ + nz * 0.003f, anchorPose), screenW, screenH)
+                    if (centerPt != null) {
+                        canvas.drawCircle(centerPt.x, centerPt.y, 14f, fillReticlePaint)
+                    }
                 }
             }
         }
 
-        private fun drawEdge(canvas: Canvas, p1: PointF?, p2: PointF?) {
+        private fun drawEdge(canvas: Canvas, p1: PointF?, p2: PointF?, paint: Paint) {
             if (p1 != null && p2 != null) {
-                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
+                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, paint)
             }
         }
 
