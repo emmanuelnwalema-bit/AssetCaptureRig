@@ -195,21 +195,17 @@ class MainActivity : AppCompatActivity() {
             val anchor = firstHit.createAnchor()
             prismAnchor = anchor
 
+            // Compute camera azimuth in the anchor's local coordinate frame
             val camPose = frame.camera.pose
             val anchorPose = anchor.pose
-            val dx = camPose.tx() - anchorPose.tx()
-            val dz = camPose.tz() - anchorPose.tz()
-            initialAzimuth = atan2(dx, dz)
+            val camInAnchor = anchorPose.inverse().transformPoint(floatArrayOf(camPose.tx(), camPose.ty(), camPose.tz()))
+            initialAzimuth = atan2(camInAnchor[0], camInAnchor[2])
 
             isBoxPlaced = true
 
+            // Hide the visual white dots cleanly without stopping ARCore's plane tracker
             sceneView.planeRenderer.isEnabled = false
             sceneView.planeRenderer.isVisible = false
-            sceneView.session?.let { session ->
-                val config = session.config
-                config.planeFindingMode = Config.PlaneFindingMode.DISABLED
-                session.configure(config)
-            }
 
             actionButton.visibility = View.GONE
             scaleBar.visibility = View.VISIBLE
@@ -242,7 +238,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (currentStepIdx >= sequence.size || isUploading) return
+        if (currentStepIdx >= sequence.size) {
+            overlayView.postInvalidate()
+            return
+        }
 
         val anchor = prismAnchor ?: return
         val anchorPose = anchor.pose
@@ -251,9 +250,9 @@ class MainActivity : AppCompatActivity() {
 
         val desc = getFacetDescriptor(currentStepIdx)
         val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
-        val faceNormalWorld = rotateNormalByAzimuth(desc.normX, desc.normY, desc.normZ)
+        val faceNormalWorld = normalToWorld(desc.normX, desc.normY, desc.normZ, anchorPose)
 
-        // 1. Facing test (Backface Culling)
+        // 1. Backface Culling check
         val camToFaceX = camPose.tx() - faceCenterWorld[0]
         val camToFaceY = camPose.ty() - faceCenterWorld[1]
         val camToFaceZ = camPose.tz() - faceCenterWorld[2]
@@ -271,7 +270,7 @@ class MainActivity : AppCompatActivity() {
         val camForward = floatArrayOf(-camPose.zAxis[0], -camPose.zAxis[1], -camPose.zAxis[2])
         val actualTiltDeg = Math.toDegrees(asin((-camForward[1]).coerceIn(-1.0f, 1.0f).toDouble())).roundToInt()
 
-        // 3. Collimation Alignment Angle
+        // 3. Collimation Alignment Error
         val dotNormal = -(camForward[0] * faceNormalWorld[0] + camForward[1] * faceNormalWorld[1] + camForward[2] * faceNormalWorld[2])
         val normAngleErr = Math.toDegrees(acos(dotNormal.coerceIn(-1.0f, 1.0f).toDouble())).toFloat()
         val isNormalAligned = isFacingCamera && (normAngleErr <= 10.0f)
@@ -291,15 +290,20 @@ class MainActivity : AppCompatActivity() {
             valDist.text = "DIST: ${distCm.roundToInt()}cm"
             valAlign.text = "TILT: ${actualTiltDeg}° [${step.targetTilt}°]"
 
-            if (distCm < 20f) {
-                distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
-                distIndicator.setTextColor(Color.parseColor("#F85149"))
-            } else if (distCm > 38f) {
-                distIndicator.text = "MOVE CLOSER (${distCm.roundToInt()}cm) — AIM 25-32cm"
-                distIndicator.setTextColor(Color.parseColor("#E3B341"))
+            if (isUploading) {
+                distIndicator.text = "UPLOADING PLATE (${currentStepIdx + 1}/10)..."
+                distIndicator.setTextColor(Color.parseColor("#58A6FF"))
             } else {
-                distIndicator.text = "✓ FOCUS DISTANCE: ${distCm.roundToInt()}cm (SHARP)"
-                distIndicator.setTextColor(Color.parseColor("#3FB950"))
+                if (distCm < 20f) {
+                    distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
+                    distIndicator.setTextColor(Color.parseColor("#F85149"))
+                } else if (distCm > 38f) {
+                    distIndicator.text = "MOVE CLOSER (${distCm.roundToInt()}cm) — AIM 25-32cm"
+                    distIndicator.setTextColor(Color.parseColor("#E3B341"))
+                } else {
+                    distIndicator.text = "✓ FOCUS DISTANCE: ${distCm.roundToInt()}cm (SHARP)"
+                    distIndicator.setTextColor(Color.parseColor("#3FB950"))
+                }
             }
 
             if (!isFacingCamera) {
@@ -326,7 +330,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (isReadyToCapture) {
+        // Auto-snap dwell timer
+        if (isReadyToCapture && !isUploading) {
             overlayView.isAligned = true
             val now = System.currentTimeMillis()
             if (alignStartTime == null) {
@@ -336,15 +341,20 @@ class MainActivity : AppCompatActivity() {
                 triggerFullResCapture()
             }
         } else {
-            overlayView.isAligned = false
-            alignStartTime = null
+            if (!isUploading) {
+                overlayView.isAligned = false
+                alignStartTime = null
+            }
         }
 
+        // Keep 60 fps render loop active during capture and upload
         overlayView.postInvalidate()
     }
 
     private fun triggerFullResCapture() {
+        if (isUploading || currentStepIdx >= sequence.size) return
         isUploading = true
+
         runOnUiThread {
             distIndicator.text = "CAPTURING SHARP PLATE..."
             playSnapFeedback()
@@ -353,10 +363,18 @@ class MainActivity : AppCompatActivity() {
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
         PixelCopy.request(sceneView, bitmap, { copyResult ->
             if (copyResult == PixelCopy.SUCCESS) {
-                val stream = ByteArrayOutputStream()
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
-                val jpegBytes = stream.toByteArray()
-                uploadToModal(sequence[currentStepIdx].id, jpegBytes)
+                // Background worker thread for compression and network transfer
+                Thread {
+                    try {
+                        val stream = ByteArrayOutputStream()
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, stream)
+                        val jpegBytes = stream.toByteArray()
+                        uploadToModal(sequence[currentStepIdx].id, jpegBytes)
+                    } catch (e: Exception) {
+                        Log.e("Capture", "Error compressing/uploading plate", e)
+                        isUploading = false
+                    }
+                }.start()
             } else {
                 isUploading = false
             }
@@ -398,6 +416,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onResponse(call: Call, response: Response) {
+                response.close()
                 runOnUiThread {
                     currentStepIdx++
                     isUploading = false
@@ -449,20 +468,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun rotateNormalByAzimuth(nx: Float, ny: Float, nz: Float): FloatArray {
+    private fun rotateByAzimuth(x: Float, y: Float, z: Float): FloatArray {
         val c = cos(initialAzimuth)
         val s = sin(initialAzimuth)
-        return floatArrayOf(nx * c + nz * s, ny, -nx * s + nz * c)
+        return floatArrayOf(x * c + z * s, y, -x * s + z * c)
     }
 
-    // Unified gravity-aligned transformation matching normal calculation
+    // Rigid 6DoF point transformation bound to ARCore anchor
     private fun localToWorld(lx: Float, ly: Float, lz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
-        val c = cos(initialAzimuth)
-        val s = sin(initialAzimuth)
-        val rx = lx * c + lz * s
-        val ry = ly
-        val rz = -lx * s + lz * c
-        return floatArrayOf(anchorPose.tx() + rx, anchorPose.ty() + ry, anchorPose.tz() + rz)
+        val rotated = rotateByAzimuth(lx, ly, lz)
+        return anchorPose.transformPoint(rotated)
+    }
+
+    // Rigid 6DoF normal transformation bound to ARCore anchor
+    private fun normalToWorld(nx: Float, ny: Float, nz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
+        val rotated = rotateByAzimuth(nx, ny, nz)
+        return anchorPose.rotateVector(rotated)
     }
 
     inner class PrismOverlayView(context: Context) : View(context) {
@@ -603,11 +624,11 @@ class MainActivity : AppCompatActivity() {
             drawEdge(canvas, botPts[2], cornerPts[1], wirePaint)
             drawEdge(canvas, botPts[1], cornerPts[1], wirePaint)
 
-            // Facet and 3D Reticle
+            // Active Facet & 3D Reticle
             if (currentStepIdx < sequence.size) {
                 val desc = getFacetDescriptor(currentStepIdx)
                 val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
-                val faceNormalWorld = rotateNormalByAzimuth(desc.normX, desc.normY, desc.normZ)
+                val faceNormalWorld = normalToWorld(desc.normX, desc.normY, desc.normZ, anchorPose)
 
                 val camPose = camera.pose
                 val camToFaceX = camPose.tx() - faceCenterWorld[0]
@@ -643,7 +664,7 @@ class MainActivity : AppCompatActivity() {
                         canvas.drawPath(path, facetPaint)
                     }
 
-                    // Compute local tangent axes for true planar reticle
+                    // Local tangent frame for planar 3D reticle
                     val nx = desc.normX
                     val ny = desc.normY
                     val nz = desc.normZ
@@ -667,7 +688,7 @@ class MainActivity : AppCompatActivity() {
 
                     val radius = min(prismWidth, prismDepth) * 0.22f
 
-                    // 3D Circular Ring lying flat on facet
+                    // 3D Circular Ring lying flat on the facet
                     val ringPts = mutableListOf<PointF?>()
                     for (i in 0 until 16) {
                         val angle = (2.0 * Math.PI * i / 16).toFloat()
