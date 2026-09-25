@@ -214,7 +214,7 @@ class MainActivity : AppCompatActivity() {
                     gravity = android.view.Gravity.BOTTOM
                 }
                 text = "${i + 1}"
-                textSize = 9sp
+                textSize = 9f
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#B30D1117"))
                 gravity = android.view.Gravity.CENTER
