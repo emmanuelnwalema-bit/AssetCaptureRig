@@ -12,11 +12,7 @@ import android.util.Base64
 import android.util.Log
 import android.view.PixelCopy
 import android.view.View
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
@@ -28,6 +24,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Locale
 import kotlin.math.*
@@ -55,7 +53,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnScaleDown: Button
     private lateinit var btnScaleUp: Button
     private lateinit var forceSnapBtn: Button
+    private lateinit var batchUploadBtn: Button
     private lateinit var actionButton: Button
+
+    private lateinit var previewScrollView: HorizontalScrollView
+    private lateinit var previewContainer: LinearLayout
+
+    private lateinit var fullPreviewLayout: FrameLayout
+    private lateinit var fullImageView: ImageView
+    private lateinit var fullPreviewLabel: TextView
+    private lateinit var closePreviewBtn: Button
 
     private val httpClient = OkHttpClient()
     private val modalEndpoint = "https://emmanuelnwalema--mobile-6dof-capture-ui.modal.run/upload_plate"
@@ -63,15 +70,20 @@ class MainActivity : AppCompatActivity() {
 
     private var currentStepIdx = 0
     private var isBoxPlaced = false
-    private var isUploading = false
+    private var isCapturing = false
+    private var isBatchUploading = false
     private var lastFrame: Frame? = null
     private var prismAnchor: Anchor? = null
     private var initialAzimuth = 0f
     private var alignStartTime: Long? = null
+    private var cooldownUntil: Long = 0L
 
     private var prismWidth = 0.18f
     private var prismDepth = 0.18f
     private var prismHeight = 0.14f
+
+    private val capturedThumbnails = mutableMapOf<Int, Bitmap>()
+    private val previewCardViews = mutableListOf<ImageView>()
 
     data class SequenceStep(
         val id: String,
@@ -118,14 +130,25 @@ class MainActivity : AppCompatActivity() {
         btnScaleDown = findViewById(R.id.btnScaleDown)
         btnScaleUp = findViewById(R.id.btnScaleUp)
         forceSnapBtn = findViewById(R.id.forceSnapBtn)
+        batchUploadBtn = findViewById(R.id.batchUploadBtn)
         actionButton = findViewById(R.id.actionButton)
+
+        previewScrollView = findViewById(R.id.previewScrollView)
+        previewContainer = findViewById(R.id.previewContainer)
+
+        fullPreviewLayout = findViewById(R.id.fullPreviewLayout)
+        fullImageView = findViewById(R.id.fullImageView)
+        fullPreviewLabel = findViewById(R.id.fullPreviewLabel)
+        closePreviewBtn = findViewById(R.id.closePreviewBtn)
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
+
+        buildThumbnailStrip()
 
         sceneView.sessionConfiguration = { _, config ->
             config.focusMode = Config.FocusMode.AUTO
@@ -143,9 +166,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         forceSnapBtn.setOnClickListener {
-            if (!isUploading && currentStepIdx < sequence.size) {
-                triggerFullResCapture()
+            if (!isCapturing && currentStepIdx < sequence.size) {
+                triggerLocalCapture()
             }
+        }
+
+        batchUploadBtn.setOnClickListener {
+            if (!isBatchUploading && capturedThumbnails.isNotEmpty()) {
+                startBatchUpload()
+            }
+        }
+
+        closePreviewBtn.setOnClickListener {
+            fullPreviewLayout.visibility = View.GONE
         }
 
         btnScaleUp.setOnClickListener { scalePrism(1.08f) }
@@ -153,6 +186,62 @@ class MainActivity : AppCompatActivity() {
 
         updateChecklistUI()
         updateScaleLabels()
+    }
+
+    private fun buildThumbnailStrip() {
+        previewContainer.removeAllViews()
+        previewCardViews.clear()
+
+        val dpWidth = (64 * resources.displayMetrics.density).toInt()
+        val dpHeight = (64 * resources.displayMetrics.density).toInt()
+        val dpMargin = (4 * resources.displayMetrics.density).toInt()
+
+        for (i in sequence.indices) {
+            val frame = FrameLayout(this)
+            val params = LinearLayout.LayoutParams(dpWidth, dpHeight).apply {
+                setMargins(dpMargin, 0, dpMargin, 0)
+            }
+            frame.layoutParams = params
+            frame.setBackgroundColor(Color.parseColor("#21262D"))
+
+            val iv = ImageView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+
+            val badge = TextView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = android.view.Gravity.BOTTOM
+                }
+                text = "${i + 1}"
+                textSize = 9sp
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#B30D1117"))
+                gravity = android.view.Gravity.CENTER
+            }
+
+            frame.addView(iv)
+            frame.addView(badge)
+
+            frame.setOnClickListener {
+                showFullPreview(i)
+            }
+
+            previewContainer.addView(frame)
+            previewCardViews.add(iv)
+        }
+    }
+
+    private fun showFullPreview(idx: Int) {
+        val file = File(cacheDir, "plate_${sequence[idx].id}.jpg")
+        if (file.exists()) {
+            val bmp = BitmapFactory.decodeFile(file.absolutePath)
+            fullImageView.setImageBitmap(bmp)
+            fullPreviewLabel.text = "${sequence[idx].label} (LOCAL FILE SAVED)"
+            fullPreviewLayout.visibility = View.VISIBLE
+        } else {
+            Toast.makeText(this, "Facet ${idx + 1} not captured yet", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun scalePrism(factor: Float) {
@@ -175,15 +264,19 @@ class MainActivity : AppCompatActivity() {
         val sbL = StringBuilder()
         val sbR = StringBuilder()
         for (i in 0 until 5) {
-            val icon = if (i < currentStepIdx) "🟩" else if (i == currentStepIdx) "▶" else "⬜"
+            val icon = if (capturedThumbnails.containsKey(i)) "🟩" else if (i == currentStepIdx) "▶" else "⬜"
             sbL.append("$icon ${sequence[i].label.substring(3)}\n")
         }
         for (i in 5 until 10) {
-            val icon = if (i < currentStepIdx) "🟩" else if (i == currentStepIdx) "▶" else "⬜"
+            val icon = if (capturedThumbnails.containsKey(i)) "🟩" else if (i == currentStepIdx) "▶" else "⬜"
             sbR.append("$icon ${sequence[i].label.substring(3)}\n")
         }
         chkListLeft.text = sbL.toString().trimEnd()
         chkListRight.text = sbR.toString().trimEnd()
+
+        val capturedCount = capturedThumbnails.size
+        batchUploadBtn.text = if (capturedCount == 10) "UPLOAD ALL 10 PLATES TO MODAL" else "UPLOAD PLATES TO MODAL ($capturedCount/10)"
+        batchUploadBtn.visibility = if (capturedCount > 0) View.VISIBLE else View.GONE
     }
 
     private fun placePrismAtHitTest() {
@@ -195,7 +288,6 @@ class MainActivity : AppCompatActivity() {
             val anchor = firstHit.createAnchor()
             prismAnchor = anchor
 
-            // Compute camera azimuth in the anchor's local coordinate frame
             val camPose = frame.camera.pose
             val anchorPose = anchor.pose
             val camInAnchor = anchorPose.inverse().transformPoint(floatArrayOf(camPose.tx(), camPose.ty(), camPose.tz()))
@@ -203,12 +295,12 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
-            // Hide the visual white dots cleanly without stopping ARCore's plane tracker
             sceneView.planeRenderer.isEnabled = false
             sceneView.planeRenderer.isVisible = false
 
             actionButton.visibility = View.GONE
             scaleBar.visibility = View.VISIBLE
+            previewScrollView.visibility = View.VISIBLE
             forceSnapBtn.visibility = View.VISIBLE
             forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
             targetBadge.text = sequence[currentStepIdx].label
@@ -290,20 +382,15 @@ class MainActivity : AppCompatActivity() {
             valDist.text = "DIST: ${distCm.roundToInt()}cm"
             valAlign.text = "TILT: ${actualTiltDeg}° [${step.targetTilt}°]"
 
-            if (isUploading) {
-                distIndicator.text = "UPLOADING PLATE (${currentStepIdx + 1}/10)..."
-                distIndicator.setTextColor(Color.parseColor("#58A6FF"))
+            if (distCm < 20f) {
+                distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
+                distIndicator.setTextColor(Color.parseColor("#F85149"))
+            } else if (distCm > 38f) {
+                distIndicator.text = "MOVE CLOSER (${distCm.roundToInt()}cm) — AIM 25-32cm"
+                distIndicator.setTextColor(Color.parseColor("#E3B341"))
             } else {
-                if (distCm < 20f) {
-                    distIndicator.text = "⚠️ TOO CLOSE (${distCm.roundToInt()}cm) — STEP BACK"
-                    distIndicator.setTextColor(Color.parseColor("#F85149"))
-                } else if (distCm > 38f) {
-                    distIndicator.text = "MOVE CLOSER (${distCm.roundToInt()}cm) — AIM 25-32cm"
-                    distIndicator.setTextColor(Color.parseColor("#E3B341"))
-                } else {
-                    distIndicator.text = "✓ FOCUS DISTANCE: ${distCm.roundToInt()}cm (SHARP)"
-                    distIndicator.setTextColor(Color.parseColor("#3FB950"))
-                }
+                distIndicator.text = "✓ FOCUS DISTANCE: ${distCm.roundToInt()}cm (SHARP)"
+                distIndicator.setTextColor(Color.parseColor("#3FB950"))
             }
 
             if (!isFacingCamera) {
@@ -330,61 +417,139 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Auto-snap dwell timer
-        if (isReadyToCapture && !isUploading) {
+        val now = System.currentTimeMillis()
+        if (isReadyToCapture && !isCapturing && now >= cooldownUntil) {
             overlayView.isAligned = true
-            val now = System.currentTimeMillis()
             if (alignStartTime == null) {
                 alignStartTime = now
             } else if (now - alignStartTime!! >= 450) {
                 alignStartTime = null
-                triggerFullResCapture()
+                triggerLocalCapture()
             }
         } else {
-            if (!isUploading) {
+            if (!isCapturing) {
                 overlayView.isAligned = false
                 alignStartTime = null
             }
         }
 
-        // Keep 60 fps render loop active during capture and upload
         overlayView.postInvalidate()
     }
 
-    private fun triggerFullResCapture() {
-        if (isUploading || currentStepIdx >= sequence.size) return
-        isUploading = true
+    private fun triggerLocalCapture() {
+        if (isCapturing || currentStepIdx >= sequence.size) return
+        isCapturing = true
 
-        runOnUiThread {
-            distIndicator.text = "CAPTURING SHARP PLATE..."
-            playSnapFeedback()
-        }
+        val snappedStepIdx = currentStepIdx
+        val step = sequence[snappedStepIdx]
+
+        playSnapFeedback()
 
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
         PixelCopy.request(sceneView, bitmap, { copyResult ->
             if (copyResult == PixelCopy.SUCCESS) {
-                // Background worker thread for compression and network transfer
                 Thread {
                     try {
-                        val stream = ByteArrayOutputStream()
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, stream)
-                        val jpegBytes = stream.toByteArray()
-                        uploadToModal(sequence[currentStepIdx].id, jpegBytes)
+                        val file = File(cacheDir, "plate_${step.id}.jpg")
+                        val fos = FileOutputStream(file)
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+                        fos.flush()
+                        fos.close()
+
+                        val thumb = Bitmap.createScaledBitmap(bitmap, 128, 128, false)
+                        capturedThumbnails[snappedStepIdx] = thumb
+
+                        runOnUiThread {
+                            previewCardViews[snappedStepIdx].setImageBitmap(thumb)
+
+                            currentStepIdx++
+                            isCapturing = false
+                            cooldownUntil = System.currentTimeMillis() + 800L
+                            alignStartTime = null
+                            updateChecklistUI()
+
+                            if (currentStepIdx >= sequence.size) {
+                                targetBadge.text = "✓ ALL 10 PLATES STORED LOCALLY"
+                                targetBadge.setTextColor(Color.parseColor("#3FB950"))
+                                distIndicator.text = "CAPTURE COMPLETE"
+                                distIndicator.setTextColor(Color.parseColor("#3FB950"))
+                                normalIndicator.text = "READY FOR MODAL BATCH UPLOAD"
+                                centerIndicator.text = "TAP UPLOAD BELOW"
+                                forceSnapBtn.visibility = View.GONE
+                                scaleBar.visibility = View.GONE
+                            } else {
+                                targetBadge.text = sequence[currentStepIdx].label
+                                forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
+                            }
+                            overlayView.postInvalidate()
+                        }
                     } catch (e: Exception) {
-                        Log.e("Capture", "Error compressing/uploading plate", e)
-                        isUploading = false
+                        Log.e("Capture", "Error saving plate locally", e)
+                        isCapturing = false
                     }
                 }.start()
             } else {
-                isUploading = false
+                isCapturing = false
             }
         }, Handler(Looper.getMainLooper()))
+    }
+
+    private fun startBatchUpload() {
+        isBatchUploading = true
+        batchUploadBtn.isEnabled = false
+        batchUploadBtn.text = "UPLOADING 0/${capturedThumbnails.size}..."
+
+        Thread {
+            val total = capturedThumbnails.size
+            var uploaded = 0
+
+            for ((idx, _) in capturedThumbnails.entries.sortedBy { it.key }) {
+                val step = sequence[idx]
+                val file = File(cacheDir, "plate_${step.id}.jpg")
+                if (!file.exists()) continue
+
+                val bytes = file.readBytes()
+                val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+                val json = JSONObject().apply {
+                    put("target_id", step.id)
+                    put("b64", b64)
+                    put("dimensions", JSONObject().apply {
+                        put("w", prismWidth)
+                        put("h", prismHeight)
+                        put("d", prismDepth)
+                    })
+                }
+
+                val body = json.toString().toRequestBody("application/json".toMediaType())
+                val request = Request.Builder().url(modalEndpoint).post(body).build()
+
+                try {
+                    val response = httpClient.newCall(request).execute()
+                    response.close()
+                    uploaded++
+                    runOnUiThread {
+                        batchUploadBtn.text = "UPLOADING $uploaded/$total..."
+                    }
+                } catch (e: Exception) {
+                    Log.e("BatchUpload", "Failed on ${step.id}", e)
+                }
+            }
+
+            runOnUiThread {
+                isBatchUploading = false
+                batchUploadBtn.isEnabled = true
+                batchUploadBtn.text = "✓ ALL $uploaded PLATES ON MODAL VOLUME"
+                batchUploadBtn.setBackgroundColor(Color.parseColor("#238636"))
+                Toast.makeText(this, "Batch upload complete ($uploaded plates)", Toast.LENGTH_LONG).show()
+            }
+        }.start()
     }
 
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -393,52 +558,6 @@ class MainActivity : AppCompatActivity() {
             .setDuration(180)
             .withEndAction { snapFlash.visibility = View.GONE }
             .start()
-    }
-
-    private fun uploadToModal(targetId: String, jpegBytes: ByteArray) {
-        val json = JSONObject().apply {
-            put("target_id", targetId)
-            put("b64", Base64.encodeToString(jpegBytes, Base64.NO_WRAP))
-            put("dimensions", JSONObject().apply {
-                put("w", prismWidth)
-                put("h", prismHeight)
-                put("d", prismDepth)
-            })
-        }
-
-        val body = json.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url(modalEndpoint).post(body).build()
-
-        httpClient.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                Log.e("ModalUpload", "Upload failed", e)
-                isUploading = false
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                response.close()
-                runOnUiThread {
-                    currentStepIdx++
-                    isUploading = false
-                    updateChecklistUI()
-
-                    if (currentStepIdx >= sequence.size) {
-                        targetBadge.text = "✓ ALL 10 PLATES STORED"
-                        targetBadge.setTextColor(Color.parseColor("#3FB950"))
-                        distIndicator.text = "CAPTURE COMPLETE"
-                        distIndicator.setTextColor(Color.parseColor("#3FB950"))
-                        normalIndicator.text = "STORED ON MODAL VOLUME"
-                        centerIndicator.text = ""
-                        forceSnapBtn.visibility = View.GONE
-                        scaleBar.visibility = View.GONE
-                    } else {
-                        targetBadge.text = sequence[currentStepIdx].label
-                        forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
-                    }
-                    overlayView.postInvalidate()
-                }
-            }
-        })
     }
 
     data class FacetDesc(
@@ -474,13 +593,11 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(x * c + z * s, y, -x * s + z * c)
     }
 
-    // Rigid 6DoF point transformation bound to ARCore anchor
     private fun localToWorld(lx: Float, ly: Float, lz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
         val rotated = rotateByAzimuth(lx, ly, lz)
         return anchorPose.transformPoint(rotated)
     }
 
-    // Rigid 6DoF normal transformation bound to ARCore anchor
     private fun normalToWorld(nx: Float, ny: Float, nz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
         val rotated = rotateByAzimuth(nx, ny, nz)
         return anchorPose.rotateVector(rotated)
@@ -549,7 +666,6 @@ class MainActivity : AppCompatActivity() {
             val anchor = prismAnchor ?: return
             val anchorPose = anchor.pose
 
-            // Screen-Center Reticle Guide
             canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, screenCenterGuidePaint)
             canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, screenCenterGuidePaint)
 
@@ -594,7 +710,6 @@ class MainActivity : AppCompatActivity() {
             val topPts = topLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
             val cornerPts = topCornersLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
 
-            // Wireframe
             for (i in 0 until 8) {
                 val next = (i + 1) % 8
                 drawEdge(canvas, botPts[i], botPts[next], wirePaint)
@@ -624,7 +739,6 @@ class MainActivity : AppCompatActivity() {
             drawEdge(canvas, botPts[2], cornerPts[1], wirePaint)
             drawEdge(canvas, botPts[1], cornerPts[1], wirePaint)
 
-            // Active Facet & 3D Reticle
             if (currentStepIdx < sequence.size) {
                 val desc = getFacetDescriptor(currentStepIdx)
                 val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
@@ -664,7 +778,6 @@ class MainActivity : AppCompatActivity() {
                         canvas.drawPath(path, facetPaint)
                     }
 
-                    // Local tangent frame for planar 3D reticle
                     val nx = desc.normX
                     val ny = desc.normY
                     val nz = desc.normZ
@@ -688,7 +801,6 @@ class MainActivity : AppCompatActivity() {
 
                     val radius = min(prismWidth, prismDepth) * 0.22f
 
-                    // 3D Circular Ring lying flat on the facet
                     val ringPts = mutableListOf<PointF?>()
                     for (i in 0 until 16) {
                         val angle = (2.0 * Math.PI * i / 16).toFloat()
@@ -702,7 +814,6 @@ class MainActivity : AppCompatActivity() {
                         drawEdge(canvas, ringPts[i], ringPts[next], reticlePaint)
                     }
 
-                    // 3D Crosshairs in Facet Plane
                     val ch = radius * 1.5f
                     val h1 = projectPoint(localToWorld(desc.centerX - ux * ch + nx * 0.003f, desc.centerY - uy * ch + ny * 0.003f, desc.centerZ - uz * ch + nz * 0.003f, anchorPose), screenW, screenH)
                     val h2 = projectPoint(localToWorld(desc.centerX + ux * ch + nx * 0.003f, desc.centerY + uy * ch + ny * 0.003f, desc.centerZ + uz * ch + nz * 0.003f, anchorPose), screenW, screenH)
@@ -712,7 +823,6 @@ class MainActivity : AppCompatActivity() {
                     val v2 = projectPoint(localToWorld(desc.centerX + vx * ch + nx * 0.003f, desc.centerY + vy * ch + ny * 0.003f, desc.centerZ + vz * ch + nz * 0.003f, anchorPose), screenW, screenH)
                     drawEdge(canvas, v1, v2, reticlePaint)
 
-                    // 3D Center Pip
                     val centerPt = projectPoint(localToWorld(desc.centerX + nx * 0.003f, desc.centerY + ny * 0.003f, desc.centerZ + nz * 0.003f, anchorPose), screenW, screenH)
                     if (centerPt != null) {
                         canvas.drawCircle(centerPt.x, centerPt.y, 14f, fillReticlePaint)
