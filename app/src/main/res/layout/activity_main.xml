@@ -105,7 +105,7 @@
                     android:id="@+id/valAlign"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="ALIGN: --"
+                    android:text="TILT: --"
                     android:textColor="#C9D1D9"
                     android:textSize="10sp"
                     android:fontFamily="monospace" />
@@ -167,7 +167,7 @@
                 android:fontFamily="monospace" />
         </LinearLayout>
 
-        <!-- Bottom Controls -->
+        <!-- Bottom Controls & Carousel -->
         <LinearLayout
             android:id="@+id/bottomControls"
             android:layout_width="match_parent"
@@ -176,12 +176,29 @@
             android:orientation="vertical"
             android:gravity="center">
 
+            <!-- Horizontal Captured Previews Strip -->
+            <HorizontalScrollView
+                android:id="@+id/previewScrollView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/previewContainer"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical" />
+            </HorizontalScrollView>
+
             <!-- Scale Adjustment Bar -->
             <LinearLayout
                 android:id="@+id/scaleBar"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="8dp"
+                android:layout_marginBottom="6dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:visibility="gone">
@@ -231,6 +248,19 @@
                 android:textStyle="bold"
                 android:visibility="gone" />
 
+            <!-- Batch Upload Button -->
+            <Button
+                android:id="@+id/batchUploadBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:backgroundTint="#1F6FEB"
+                android:text="UPLOAD PLATES TO MODAL (0/10)"
+                android:textColor="#FFFFFF"
+                android:fontFamily="monospace"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
             <!-- Primary Action Button -->
             <Button
                 android:id="@+id/actionButton"
@@ -244,4 +274,46 @@
                 android:padding="14dp" />
         </LinearLayout>
     </RelativeLayout>
+
+    <!-- Fullscreen Preview Overlay Modal -->
+    <FrameLayout
+        android:id="@+id/fullPreviewLayout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#E6000000"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <ImageView
+            android:id="@+id/fullImageView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_margin="32dp"
+            android:scaleType="fitCenter" />
+
+        <TextView
+            android:id="@+id/fullPreviewLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="40dp"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:fontFamily="monospace"
+            android:textStyle="bold"
+            android:background="#80000000"
+            android:padding="8dp" />
+
+        <Button
+            android:id="@+id/closePreviewBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="40dp"
+            android:backgroundTint="#21262D"
+            android:text="CLOSE PREVIEW"
+            android:textColor="#FFFFFF"
+            android:fontFamily="monospace" />
+    </FrameLayout>
 </FrameLayout>
