@@ -607,7 +607,7 @@ class MainActivity : AppCompatActivity() {
         return anchorPose.rotateVector(rotated)
     }
 
-    // --- 2. Fully Filleted Watertight Squircle Mesh Overlay ---
+    // --- 2. Perforated Metal Mesh Squircle Overlay ---
 
     inner class PrismOverlayView(context: Context) : View(context) {
 
@@ -618,7 +618,7 @@ class MainActivity : AppCompatActivity() {
             strokeWidth = 2.5f
         }
 
-        private val facetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        private val perforatedMeshPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
 
@@ -640,6 +640,58 @@ class MainActivity : AppCompatActivity() {
         private val viewMatrix = FloatArray(16)
         private val projMatrix = FloatArray(16)
         private val vpMatrix = FloatArray(16)
+
+        // Cached Perforated Metal Mesh Shaders
+        private val redMeshShader = createPerforatedShader(Color.parseColor("#F85149"))
+        private val greenMeshShader = createPerforatedShader(Color.parseColor("#3FB950"))
+        private val greyMeshShader = createPerforatedShader(Color.parseColor("#8B949E"))
+
+        private fun createPerforatedShader(baseColor: Int): BitmapShader {
+            val tileSize = 24
+            val bmp = Bitmap.createBitmap(tileSize, tileSize, Bitmap.Config.ARGB_8888)
+            val cv = Canvas(bmp)
+
+            // 1. Semi-translucent colored sheet metal body
+            val bodyPaint = Paint().apply {
+                color = Color.argb(175, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+                style = Paint.Style.FILL
+            }
+            cv.drawRect(0f, 0f, tileSize.toFloat(), tileSize.toFloat(), bodyPaint)
+
+            // 2. Punch true transparent circular holes
+            val clearHolePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+            }
+            val holeR = 5.2f
+            // Staggered perforated pattern: center hole + 4 quadrant corners
+            cv.drawCircle(tileSize / 2f, tileSize / 2f, holeR, clearHolePaint)
+            cv.drawCircle(0f, 0f, holeR, clearHolePaint)
+            cv.drawCircle(tileSize.toFloat(), 0f, holeR, clearHolePaint)
+            cv.drawCircle(0f, tileSize.toFloat(), holeR, clearHolePaint)
+            cv.drawCircle(tileSize.toFloat(), tileSize.toFloat(), holeR, clearHolePaint)
+
+            // 3. Stamped metallic rim highlight around holes
+            val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(90, 255, 255, 255)
+                style = Paint.Style.STROKE
+                strokeWidth = 1.0f
+            }
+            cv.drawCircle(tileSize / 2f, tileSize / 2f, holeR, rimPaint)
+            cv.drawCircle(0f, 0f, holeR, rimPaint)
+            cv.drawCircle(tileSize.toFloat(), 0f, holeR, rimPaint)
+            cv.drawCircle(0f, tileSize.toFloat(), holeR, rimPaint)
+            cv.drawCircle(tileSize.toFloat(), tileSize.toFloat(), holeR, rimPaint)
+
+            return BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+        }
+
+        private fun getMeshShaderForColor(color: Int): BitmapShader {
+            return when (color) {
+                Color.parseColor("#3FB950") -> greenMeshShader
+                Color.parseColor("#8B949E") -> greyMeshShader
+                else -> redMeshShader
+            }
+        }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
@@ -678,13 +730,12 @@ class MainActivity : AppCompatActivity() {
             // Geometry Parameters
             val hW = prismWidth / 2f
             val hD = prismDepth / 2f
-            val r = min(hW, hD) * 0.36f // Prominent corner fillet radius
+            val r = min(hW, hD) * 0.36f
             val hMid = prismHeight * 0.50f
             val tan30 = tan(Math.toRadians(30.0)).toFloat()
             val dChamfer = min((prismHeight - hMid) * tan30, r * 0.82f)
-            val rTop = max(r - dChamfer * 0.45f, 0.02f) // Filleted top squircle radius
+            val rTop = max(r - dChamfer * 0.45f, 0.02f)
 
-            // 24-vertex smooth perimeter loops (6 vertices per quadrant: 2 straight bounds + 4 radial arc points)
             val baseLoop = generateFilletedSquircleLoop(hW, hD, r)
             val midLoop = generateFilletedSquircleLoop(hW, hD, r)
             val topLoop = generateFilletedSquircleLoop(hW - dChamfer, hD - dChamfer, rTop)
@@ -712,7 +763,7 @@ class MainActivity : AppCompatActivity() {
 
             // --- 2. RENDER UPPER TIER (y = h_mid to prismHeight: 30° Inward Slant) ---
             for (sector in 0 until 4) {
-                // A. Slanted Cardinal Wall (INACTIVE: Completes watertight loft -> Visible Grey with filleted borders)
+                // A. Slanted Cardinal Wall (INACTIVE: Completes watertight loft -> Visible Grey)
                 drawFilletedWallSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, greyColor, false)
 
                 // B. Slanted Corner Chamfer Arc (ACTIVE: Facets 1, 3, 5, 7)
@@ -755,14 +806,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Generates 24 smoothly filleted boundary vertices (6 per quadrant: 2 straight bounds + 4 radial arc points)
         private fun generateFilletedSquircleLoop(hW: Float, hD: Float, r: Float): List<FloatArray> {
             val loop = mutableListOf<FloatArray>()
             val xS = hW - r
             val zS = hD - r
 
             for (quad in 0 until 4) {
-                // Add cardinal straight section endpoints
                 when (quad) {
                     0 -> { loop.add(floatArrayOf(-xS, 0f, hD)); loop.add(floatArrayOf(xS, 0f, hD)) }
                     1 -> { loop.add(floatArrayOf(hW, 0f, zS)); loop.add(floatArrayOf(hW, 0f, -zS)) }
@@ -770,7 +819,6 @@ class MainActivity : AppCompatActivity() {
                     3 -> { loop.add(floatArrayOf(-hW, 0f, -zS)); loop.add(floatArrayOf(-hW, 0f, zS)) }
                 }
 
-                // Add 4 smooth radial fillet vertices around the rounded corner
                 val cX = if (quad == 0 || quad == 1) xS else -xS
                 val cZ = if (quad == 0 || quad == 3) zS else -zS
                 val startAngle = Math.toRadians((90.0 - quad * 90.0))
@@ -801,24 +849,20 @@ class MainActivity : AppCompatActivity() {
             val p3 = projectPoint(localToWorld(top[i0][0], y1, top[i0][2], anchorPose), w, h)
 
             if (p0 != null && p1 != null && p2 != null && p3 != null) {
-                val alpha = if (isActive) 50 else 22
-                facetPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+                // Perforated metal sheet fill
+                perforatedMeshPaint.shader = getMeshShaderForColor(color)
                 val path = Path().apply {
                     moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
                 }
-                canvas.drawPath(path, facetPaint)
+                canvas.drawPath(path, perforatedMeshPaint)
 
+                // Crisp boundary contour
                 wirePaint.color = color
                 wirePaint.strokeWidth = if (isActive) 3.5f else 2.2f
                 canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
                 canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
                 canvas.drawLine(p2.x, p2.y, p3.x, p3.y, wirePaint)
                 canvas.drawLine(p3.x, p3.y, p0.x, p0.y, wirePaint)
-
-                // Subdivided central mesh rib
-                val pMidB = projectPoint(localToWorld((base[i0][0] + base[i1][0]) / 2f, y0, (base[i0][2] + base[i1][2]) / 2f, anchorPose), w, h)
-                val pMidT = projectPoint(localToWorld((top[i0][0] + top[i1][0]) / 2f, y1, (top[i0][2] + top[i1][2]) / 2f, anchorPose), w, h)
-                if (pMidB != null && pMidT != null) canvas.drawLine(pMidB.x, pMidB.y, pMidT.x, pMidT.y, wirePaint)
             }
         }
 
@@ -830,12 +874,12 @@ class MainActivity : AppCompatActivity() {
             w: Float, h: Float, color: Int, isActive: Boolean
         ) {
             val startIdx = corner * 6 + 1
-            wirePaint.color = color
-            wirePaint.strokeWidth = if (isActive) 3.5f else 2.0f
-            val alpha = if (isActive) 55 else 18
-            facetPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+            perforatedMeshPaint.shader = getMeshShaderForColor(color)
 
-            // Subdivide the rounded corner quadrant into 5 smooth filleted micro-quads
+            wirePaint.color = color
+            wirePaint.strokeWidth = if (isActive) 3.0f else 2.0f
+
+            // Construct smooth filleted mesh quads with perforated hole fill
             for (step in 0 until 5) {
                 val iA = (startIdx + step) % base.size
                 val iB = (startIdx + step + 1) % base.size
@@ -849,12 +893,13 @@ class MainActivity : AppCompatActivity() {
                     val path = Path().apply {
                         moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
                     }
-                    canvas.drawPath(path, facetPaint)
+                    canvas.drawPath(path, perforatedMeshPaint)
 
+                    // Draw only bottom, top, and corner boundary arcs to prevent barcode lines
                     canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
-                    canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
                     canvas.drawLine(p2.x, p2.y, p3.x, p3.y, wirePaint)
-                    canvas.drawLine(p3.x, p3.y, p0.x, p0.y, wirePaint)
+                    if (step == 0) canvas.drawLine(p0.x, p0.y, p3.x, p3.y, wirePaint)
+                    if (step == 4) canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
                 }
             }
         }
@@ -871,14 +916,13 @@ class MainActivity : AppCompatActivity() {
                 val isActive = isTopCaptured || isTopActiveStep
 
                 if (fill) {
-                    val alpha = if (isActive) 55 else 30
-                    facetPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+                    perforatedMeshPaint.shader = getMeshShaderForColor(color)
                     val path = Path().apply {
                         moveTo(pts[0]!!.x, pts[0]!!.y)
                         for (i in 1 until pts.size) lineTo(pts[i]!!.x, pts[i]!!.y)
                         close()
                     }
-                    canvas.drawPath(path, facetPaint)
+                    canvas.drawPath(path, perforatedMeshPaint)
                 }
 
                 wirePaint.color = color
@@ -887,14 +931,6 @@ class MainActivity : AppCompatActivity() {
                     val next = (i + 1) % pts.size
                     canvas.drawLine(pts[i]!!.x, pts[i]!!.y, pts[next]!!.x, pts[next]!!.y, wirePaint)
                 }
-
-                // Internal rounded ceiling cross grid
-                val p0 = pts[0]
-                val pMid = pts[pts.size / 2]
-                if (p0 != null && pMid != null) canvas.drawLine(p0.x, p0.y, pMid.x, pMid.y, wirePaint)
-                val pQuarter = pts[pts.size / 4]
-                val pThreeQuarter = pts[(pts.size * 3) / 4]
-                if (pQuarter != null && pThreeQuarter != null) canvas.drawLine(pQuarter.x, pQuarter.y, pThreeQuarter.x, pThreeQuarter.y, wirePaint)
             }
         }
 
