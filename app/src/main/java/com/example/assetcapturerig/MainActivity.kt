@@ -143,7 +143,7 @@ class MainActivity : AppCompatActivity() {
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
 
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
@@ -549,7 +549,7 @@ class MainActivity : AppCompatActivity() {
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -560,9 +560,12 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
+    // --- Squircle 3D Facet Descriptors ---
+
     data class FacetDesc(
         val centerX: Float, val centerY: Float, val centerZ: Float,
-        val normX: Float, val normY: Float, val normZ: Float
+        val normX: Float, val normY: Float, val normZ: Float,
+        val isChamfer: Boolean
     )
 
     private fun getFacetDescriptor(step: Int): FacetDesc {
@@ -571,19 +574,20 @@ class MainActivity : AppCompatActivity() {
         val sqrt2Inv = 0.7071f
         val hW = prismWidth / 2f
         val hD = prismDepth / 2f
-        val hH = prismHeight / 2f
+        val hMid = prismHeight * 0.55f
+        val hChamferCenter = hMid + (prismHeight - hMid) * 0.5f
 
         return when (step) {
-            0 -> FacetDesc(0f, hH, hD, 0f, 0f, 1f)
-            1 -> FacetDesc(hW * 0.7f, hH, hD * 0.7f, cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv)
-            2 -> FacetDesc(hW, hH, 0f, 1f, 0f, 0f)
-            3 -> FacetDesc(hW * 0.7f, hH, -hD * 0.7f, cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv)
-            4 -> FacetDesc(0f, hH, -hD, 0f, 0f, -1f)
-            5 -> FacetDesc(-hW * 0.7f, hH, -hD * 0.7f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv)
-            6 -> FacetDesc(-hW, hH, 0f, -1f, 0f, 0f)
-            7 -> FacetDesc(-hW * 0.7f, hH, hD * 0.7f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv)
-            8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f)
-            else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f)
+            0 -> FacetDesc(0f, hMid * 0.5f, hD, 0f, 0f, 1f, false) // 1. Front (0° Upright)
+            1 -> FacetDesc(hW * 0.72f, hChamferCenter, hD * 0.72f, cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 2. Hero (30° Chamfer)
+            2 -> FacetDesc(hW, hMid * 0.5f, 0f, 1f, 0f, 0f, false) // 3. Right (0° Upright)
+            3 -> FacetDesc(hW * 0.72f, hChamferCenter, -hD * 0.72f, cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 4. Rear-Right (30° Chamfer)
+            4 -> FacetDesc(0f, hMid * 0.5f, -hD, 0f, 0f, -1f, false) // 5. Back (0° Upright)
+            5 -> FacetDesc(-hW * 0.72f, hChamferCenter, -hD * 0.72f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 6. Rear-Left (30° Chamfer)
+            6 -> FacetDesc(-hW, hMid * 0.5f, 0f, -1f, 0f, 0f, false) // 7. Left (0° Upright)
+            7 -> FacetDesc(-hW * 0.72f, hChamferCenter, hD * 0.72f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 8. Front-Left (30° Chamfer)
+            8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false) // 9. Top Overhead (90° Down)
+            else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)      // 10. Base (60° Up)
         }
     }
 
@@ -603,14 +607,15 @@ class MainActivity : AppCompatActivity() {
         return anchorPose.rotateVector(rotated)
     }
 
+    // --- Chamfered Squircle Mesh Overlay ---
+
     inner class PrismOverlayView(context: Context) : View(context) {
 
         var isAligned = false
 
         private val wirePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#58A6FF")
             style = Paint.Style.STROKE
-            strokeWidth = 4f
+            strokeWidth = 2.5f
         }
 
         private val facetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -626,8 +631,8 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.FILL
         }
 
-        private val screenCenterGuidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(130, 255, 255, 255)
+        private val centerGuidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(100, 255, 255, 255)
             style = Paint.Style.STROKE
             strokeWidth = 3f
         }
@@ -657,7 +662,7 @@ class MainActivity : AppCompatActivity() {
                     if (p != null) {
                         reticlePaint.color = Color.parseColor("#58A6FF")
                         canvas.drawCircle(p.x, p.y, 60f, reticlePaint)
-                        canvas.drawCircle(p.x, p.y, 20f, reticlePaint)
+                        canvas.drawCircle(p.x, p.y, 18f, reticlePaint)
                     }
                 }
                 return
@@ -666,79 +671,68 @@ class MainActivity : AppCompatActivity() {
             val anchor = prismAnchor ?: return
             val anchorPose = anchor.pose
 
-            canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, screenCenterGuidePaint)
-            canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, screenCenterGuidePaint)
+            // Center Viewport Guide
+            canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, centerGuidePaint)
+            canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, centerGuidePaint)
 
+            // 1. Build Discretized Squircle Profiles (12 perimeter points)
             val hW = prismWidth / 2f
             val hD = prismDepth / 2f
-            val c = min(hW, hD) * 0.35f
+            val r = min(hW, hD) * 0.28f
+            val hMid = prismHeight * 0.55f
             val tan30 = tan(Math.toRadians(30.0)).toFloat()
-            val delta = min(prismHeight * tan30, c * 0.95f)
-            val dX = delta * 0.7071f
-            val dZ = delta * 0.7071f
+            val dChamfer = min((prismHeight - hMid) * tan30, r * 0.90f)
 
-            val botLocal = arrayOf(
-                floatArrayOf(hW - c, 0f, hD),
-                floatArrayOf(-hW + c, 0f, hD),
-                floatArrayOf(-hW, 0f, hD - c),
-                floatArrayOf(-hW, 0f, -hD + c),
-                floatArrayOf(-hW + c, 0f, -hD),
-                floatArrayOf(hW - c, 0f, -hD),
-                floatArrayOf(hW, 0f, -hD + c),
-                floatArrayOf(hW, 0f, hD - c)
-            )
+            val basePtsLocal = generateSquirclePerimeter(hW, hD, r, 0f)
+            val midPtsLocal = generateSquirclePerimeter(hW, hD, r, 0f)
+            val topPtsLocal = generateSquirclePerimeter(hW - dChamfer, hD - dChamfer, r * 0.65f, 0f)
 
-            val topLocal = arrayOf(
-                floatArrayOf(hW - c, prismHeight, hD),
-                floatArrayOf(-hW + c, prismHeight, hD),
-                floatArrayOf(-hW, prismHeight, hD - c),
-                floatArrayOf(-hW, prismHeight, -hD + c),
-                floatArrayOf(-hW + c, prismHeight, -hD),
-                floatArrayOf(hW - c, prismHeight, -hD),
-                floatArrayOf(hW, prismHeight, -hD + c),
-                floatArrayOf(hW, prismHeight, hD - c)
-            )
+            val activeStep = if (currentStepIdx < sequence.size) sequence[currentStepIdx] else null
+            val isCurrentChamferTier = activeStep?.targetTilt == 30
 
-            val topCornersLocal = arrayOf(
-                floatArrayOf((botLocal[0][0] + botLocal[7][0]) / 2f - dX, prismHeight, (botLocal[0][2] + botLocal[7][2]) / 2f - dZ),
-                floatArrayOf((botLocal[1][0] + botLocal[2][0]) / 2f + dX, prismHeight, (botLocal[1][2] + botLocal[2][2]) / 2f - dZ),
-                floatArrayOf((botLocal[3][0] + botLocal[4][0]) / 2f + dX, prismHeight, (botLocal[3][2] + botLocal[4][2]) / 2f + dZ),
-                floatArrayOf((botLocal[5][0] + botLocal[6][0]) / 2f - dX, prismHeight, (botLocal[5][2] + botLocal[6][2]) / 2f + dZ)
-            )
+            // 2. Draw Lower Tier (0° Upright Mesh & Facets: 0, 2, 4, 6)
+            for (sector in 0 until 4) {
+                val facetIdx = sector * 2
+                val isCaptured = capturedThumbnails.containsKey(facetIdx)
+                val isActive = currentStepIdx == facetIdx
 
-            val botPts = botLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
-            val topPts = topLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
-            val cornerPts = topCornersLocal.map { projectPoint(localToWorld(it[0], it[1], it[2], anchorPose), screenW, screenH) }
+                val color = when {
+                    isCaptured -> Color.parseColor("#3FB950")
+                    isActive -> if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
+                    !isCurrentChamferTier -> Color.parseColor("#80F85149")
+                    else -> Color.parseColor("#228B949E")
+                }
 
-            for (i in 0 until 8) {
-                val next = (i + 1) % 8
-                drawEdge(canvas, botPts[i], botPts[next], wirePaint)
+                drawMeshQuadSector(canvas, sector, basePtsLocal, midPtsLocal, 0f, hMid, anchorPose, screenW, screenH, color, isActive || isCaptured)
             }
-            drawEdge(canvas, botPts[1], topPts[1], wirePaint)
-            drawEdge(canvas, botPts[0], topPts[0], wirePaint)
-            drawEdge(canvas, topPts[1], topPts[0], wirePaint)
 
-            drawEdge(canvas, botPts[7], topPts[7], wirePaint)
-            drawEdge(canvas, botPts[6], topPts[6], wirePaint)
-            drawEdge(canvas, topPts[7], topPts[6], wirePaint)
+            // 3. Draw Upper Tier (30° Chamfered Corner Mesh & Facets: 1, 3, 5, 7)
+            for (corner in 0 until 4) {
+                val facetIdx = corner * 2 + 1
+                val isCaptured = capturedThumbnails.containsKey(facetIdx)
+                val isActive = currentStepIdx == facetIdx
 
-            drawEdge(canvas, botPts[5], topPts[5], wirePaint)
-            drawEdge(canvas, botPts[4], topPts[4], wirePaint)
-            drawEdge(canvas, topPts[5], topPts[4], wirePaint)
+                val color = when {
+                    isCaptured -> Color.parseColor("#3FB950")
+                    isActive -> if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
+                    isCurrentChamferTier -> Color.parseColor("#80F85149")
+                    else -> Color.parseColor("#228B949E")
+                }
 
-            drawEdge(canvas, botPts[3], topPts[3], wirePaint)
-            drawEdge(canvas, botPts[2], topPts[2], wirePaint)
-            drawEdge(canvas, topPts[3], topPts[2], wirePaint)
+                drawMeshCornerSector(canvas, corner, midPtsLocal, topPtsLocal, hMid, prismHeight, anchorPose, screenW, screenH, color, isActive || isCaptured)
+            }
 
-            drawEdge(canvas, botPts[0], cornerPts[0], wirePaint)
-            drawEdge(canvas, botPts[7], cornerPts[0], wirePaint)
-            drawEdge(canvas, botPts[6], cornerPts[3], wirePaint)
-            drawEdge(canvas, botPts[5], cornerPts[3], wirePaint)
-            drawEdge(canvas, botPts[4], cornerPts[2], wirePaint)
-            drawEdge(canvas, botPts[3], cornerPts[2], wirePaint)
-            drawEdge(canvas, botPts[2], cornerPts[1], wirePaint)
-            drawEdge(canvas, botPts[1], cornerPts[1], wirePaint)
+            // 4. Draw Flat Top Roof Cap (Facet 8)
+            val isTopCaptured = capturedThumbnails.containsKey(8)
+            val isTopActive = currentStepIdx == 8
+            val topColor = when {
+                isTopCaptured -> Color.parseColor("#3FB950")
+                isTopActive -> if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
+                else -> Color.parseColor("#308B949E")
+            }
+            drawTopCap(canvas, topPtsLocal, prismHeight, anchorPose, screenW, screenH, topColor)
 
+            // 5. Render Active 3D Planar Reticle
             if (currentStepIdx < sequence.size) {
                 val desc = getFacetDescriptor(currentStepIdx)
                 val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
@@ -749,92 +743,164 @@ class MainActivity : AppCompatActivity() {
                 val camToFaceY = camPose.ty() - faceCenterWorld[1]
                 val camToFaceZ = camPose.tz() - faceCenterWorld[2]
                 val facingDot = camToFaceX * faceNormalWorld[0] + camToFaceY * faceNormalWorld[1] + camToFaceZ * faceNormalWorld[2]
-                val isFacing = facingDot > 0.001f
 
-                if (isFacing) {
-                    facetPaint.color = if (isAligned) Color.parseColor("#803FB950") else Color.parseColor("#4558A6FF")
-
-                    val facetPoly = when (currentStepIdx) {
-                        0 -> listOf(botPts[1], botPts[0], topPts[0], topPts[1])
-                        1 -> listOf(botPts[0], botPts[7], cornerPts[0])
-                        2 -> listOf(botPts[7], botPts[6], topPts[6], topPts[7])
-                        3 -> listOf(botPts[6], botPts[5], cornerPts[3])
-                        4 -> listOf(botPts[5], botPts[4], topPts[4], topPts[5])
-                        5 -> listOf(botPts[4], botPts[3], cornerPts[2])
-                        6 -> listOf(botPts[3], botPts[2], topPts[2], topPts[3])
-                        7 -> listOf(botPts[2], botPts[1], cornerPts[1])
-                        8 -> listOf(topPts[0], topPts[2], topPts[4], topPts[6])
-                        else -> listOf(botPts[0], botPts[2], botPts[4], botPts[6])
-                    }
-
-                    if (facetPoly.all { it != null }) {
-                        val path = Path().apply {
-                            moveTo(facetPoly[0]!!.x, facetPoly[0]!!.y)
-                            for (idx in 1 until facetPoly.size) {
-                                lineTo(facetPoly[idx]!!.x, facetPoly[idx]!!.y)
-                            }
-                            close()
-                        }
-                        canvas.drawPath(path, facetPaint)
-                    }
-
-                    val nx = desc.normX
-                    val ny = desc.normY
-                    val nz = desc.normZ
-                    val ux: Float
-                    val uy: Float
-                    val uz: Float
-
-                    if (abs(ny) > 0.95f) {
-                        ux = 1f; uy = 0f; uz = 0f
-                    } else {
-                        val len = sqrt(nz * nz + nx * nx)
-                        ux = nz / len; uy = 0f; uz = -nx / len
-                    }
-                    val vx = ny * uz - nz * uy
-                    val vy = nz * ux - nx * uz
-                    val vz = nx * uy - ny * ux
-
-                    val rColor = if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#58A6FF")
-                    reticlePaint.color = rColor
-                    fillReticlePaint.color = rColor
-
-                    val radius = min(prismWidth, prismDepth) * 0.22f
-
-                    val ringPts = mutableListOf<PointF?>()
-                    for (i in 0 until 16) {
-                        val angle = (2.0 * Math.PI * i / 16).toFloat()
-                        val px = desc.centerX + radius * (cos(angle) * ux + sin(angle) * vx) + nx * 0.003f
-                        val py = desc.centerY + radius * (cos(angle) * uy + sin(angle) * vy) + ny * 0.003f
-                        val pz = desc.centerZ + radius * (cos(angle) * uz + sin(angle) * vz) + nz * 0.003f
-                        ringPts.add(projectPoint(localToWorld(px, py, pz, anchorPose), screenW, screenH))
-                    }
-                    for (i in 0 until 16) {
-                        val next = (i + 1) % 16
-                        drawEdge(canvas, ringPts[i], ringPts[next], reticlePaint)
-                    }
-
-                    val ch = radius * 1.5f
-                    val h1 = projectPoint(localToWorld(desc.centerX - ux * ch + nx * 0.003f, desc.centerY - uy * ch + ny * 0.003f, desc.centerZ - uz * ch + nz * 0.003f, anchorPose), screenW, screenH)
-                    val h2 = projectPoint(localToWorld(desc.centerX + ux * ch + nx * 0.003f, desc.centerY + uy * ch + ny * 0.003f, desc.centerZ + uz * ch + nz * 0.003f, anchorPose), screenW, screenH)
-                    drawEdge(canvas, h1, h2, reticlePaint)
-
-                    val v1 = projectPoint(localToWorld(desc.centerX - vx * ch + nx * 0.003f, desc.centerY - vy * ch + ny * 0.003f, desc.centerZ - vz * ch + nz * 0.003f, anchorPose), screenW, screenH)
-                    val v2 = projectPoint(localToWorld(desc.centerX + vx * ch + nx * 0.003f, desc.centerY + vy * ch + ny * 0.003f, desc.centerZ + vz * ch + nz * 0.003f, anchorPose), screenW, screenH)
-                    drawEdge(canvas, v1, v2, reticlePaint)
-
-                    val centerPt = projectPoint(localToWorld(desc.centerX + nx * 0.003f, desc.centerY + ny * 0.003f, desc.centerZ + nz * 0.003f, anchorPose), screenW, screenH)
-                    if (centerPt != null) {
-                        canvas.drawCircle(centerPt.x, centerPt.y, 14f, fillReticlePaint)
-                    }
+                if (facingDot > 0.001f) {
+                    drawPlanar3DReticle(canvas, desc, anchorPose, screenW, screenH)
                 }
             }
         }
 
-        private fun drawEdge(canvas: Canvas, p1: PointF?, p2: PointF?, paint: Paint) {
-            if (p1 != null && p2 != null) {
-                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, paint)
+        private fun generateSquirclePerimeter(hW: Float, hD: Float, r: Float, y: Float): List<FloatArray> {
+            val pts = mutableListOf<FloatArray>()
+            val xStraight = hW - r
+            val zStraight = hD - r
+
+            // Cardinal Front (+Z)
+            pts.add(floatArrayOf(-xStraight, y, hD))
+            pts.add(floatArrayOf(xStraight, y, hD))
+            // Front-Right Corner Arc
+            pts.add(floatArrayOf(xStraight + r * 0.7071f, y, zStraight + r * 0.7071f))
+            // Cardinal Right (+X)
+            pts.add(floatArrayOf(hW, y, zStraight))
+            pts.add(floatArrayOf(hW, y, -zStraight))
+            // Rear-Right Corner Arc
+            pts.add(floatArrayOf(xStraight + r * 0.7071f, y, -zStraight - r * 0.7071f))
+            // Cardinal Back (-Z)
+            pts.add(floatArrayOf(xStraight, y, -hD))
+            pts.add(floatArrayOf(-xStraight, y, -hD))
+            // Rear-Left Corner Arc
+            pts.add(floatArrayOf(-xStraight - r * 0.7071f, y, -zStraight - r * 0.7071f))
+            // Cardinal Left (-X)
+            pts.add(floatArrayOf(-hW, y, -zStraight))
+            pts.add(floatArrayOf(-hW, y, zStraight))
+            // Front-Left Corner Arc
+            pts.add(floatArrayOf(-xStraight - r * 0.7071f, y, zStraight + r * 0.7071f))
+
+            return pts
+        }
+
+        private fun drawMeshQuadSector(
+            canvas: Canvas, sector: Int,
+            base: List<FloatArray>, top: List<FloatArray>,
+            y0: Float, y1: Float,
+            anchorPose: com.google.ar.core.Pose,
+            w: Float, h: Float, color: Int, fill: Boolean
+        ) {
+            val i0 = (sector * 3) % base.size
+            val i1 = (i0 + 1) % base.size
+
+            val p0 = projectPoint(localToWorld(base[i0][0], y0, base[i0][2], anchorPose), w, h)
+            val p1 = projectPoint(localToWorld(base[i1][0], y0, base[i1][2], anchorPose), w, h)
+            val p2 = projectPoint(localToWorld(top[i1][0], y1, top[i1][2], anchorPose), w, h)
+            val p3 = projectPoint(localToWorld(top[i0][0], y1, top[i0][2], anchorPose), w, h)
+
+            if (p0 != null && p1 != null && p2 != null && p3 != null) {
+                if (fill) {
+                    facetPaint.color = Color.argb(45, Color.red(color), Color.green(color), Color.blue(color))
+                    val path = Path().apply {
+                        moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
+                    }
+                    canvas.drawPath(path, facetPaint)
+                }
+
+                wirePaint.color = color
+                canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
+                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
+                canvas.drawLine(p2.x, p2.y, p3.x, p3.y, wirePaint)
+                canvas.drawLine(p3.x, p3.y, p0.x, p0.y, wirePaint)
+
+                val midBase = projectPoint(localToWorld((base[i0][0] + base[i1][0]) / 2f, y0, (base[i0][2] + base[i1][2]) / 2f, anchorPose), w, h)
+                val midTop = projectPoint(localToWorld((top[i0][0] + top[i1][0]) / 2f, y1, (top[i0][2] + top[i1][2]) / 2f, anchorPose), w, h)
+                if (midBase != null && midTop != null) canvas.drawLine(midBase.x, midBase.y, midTop.x, midTop.y, wirePaint)
             }
+        }
+
+        private fun drawMeshCornerSector(
+            canvas: Canvas, corner: Int,
+            base: List<FloatArray>, top: List<FloatArray>,
+            y0: Float, y1: Float,
+            anchorPose: com.google.ar.core.Pose,
+            w: Float, h: Float, color: Int, fill: Boolean
+        ) {
+            val i0 = (corner * 3 + 1) % base.size
+            val i1 = (i0 + 1) % base.size
+            val i2 = (i0 + 2) % base.size
+
+            val p0 = projectPoint(localToWorld(base[i1][0], y0, base[i1][2], anchorPose), w, h)
+            val pTop = projectPoint(localToWorld(top[i1][0], y1, top[i1][2], anchorPose), w, h)
+            val pBaseL = projectPoint(localToWorld(base[i0][0], y0, base[i0][2], anchorPose), w, h)
+            val pBaseR = projectPoint(localToWorld(base[i2][0], y0, base[i2][2], anchorPose), w, h)
+
+            if (p0 != null && pTop != null && pBaseL != null && pBaseR != null) {
+                if (fill) {
+                    facetPaint.color = Color.argb(55, Color.red(color), Color.green(color), Color.blue(color))
+                    val path = Path().apply {
+                        moveTo(pBaseL.x, pBaseL.y); lineTo(pBaseR.x, pBaseR.y); lineTo(pTop.x, pTop.y); close()
+                    }
+                    canvas.drawPath(path, facetPaint)
+                }
+
+                wirePaint.color = color
+                canvas.drawLine(pBaseL.x, pBaseL.y, pTop.x, pTop.y, wirePaint)
+                canvas.drawLine(pBaseR.x, pBaseR.y, pTop.x, pTop.y, wirePaint)
+                canvas.drawLine(p0.x, p0.y, pTop.x, pTop.y, wirePaint)
+            }
+        }
+
+        private fun drawTopCap(canvas: Canvas, top: List<FloatArray>, y: Float, anchorPose: com.google.ar.core.Pose, w: Float, h: Float, color: Int) {
+            val pts = top.map { projectPoint(localToWorld(it[0], y, it[2], anchorPose), w, h) }
+            if (pts.all { it != null }) {
+                wirePaint.color = color
+                for (i in pts.indices) {
+                    val next = (i + 1) % pts.size
+                    canvas.drawLine(pts[i]!!.x, pts[i]!!.y, pts[next]!!.x, pts[next]!!.y, wirePaint)
+                }
+            }
+        }
+
+        private fun drawPlanar3DReticle(canvas: Canvas, desc: FacetDesc, anchorPose: com.google.ar.core.Pose, w: Float, h: Float) {
+            val rColor = if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
+            reticlePaint.color = rColor
+            fillReticlePaint.color = rColor
+
+            val nx = desc.normX; val ny = desc.normY; val nz = desc.normZ
+            val ux: Float; val uy: Float; val uz: Float
+
+            if (abs(ny) > 0.95f) {
+                ux = 1f; uy = 0f; uz = 0f
+            } else {
+                val len = sqrt(nz * nz + nx * nx)
+                ux = nz / len; uy = 0f; uz = -nx / len
+            }
+            val vx = ny * uz - nz * uy
+            val vy = nz * ux - nx * uz
+            val vz = nx * uy - ny * ux
+
+            val radius = min(prismWidth, prismDepth) * 0.20f
+
+            val ringPts = mutableListOf<PointF?>()
+            for (i in 0 until 16) {
+                val angle = (2.0 * Math.PI * i / 16).toFloat()
+                val px = desc.centerX + radius * (cos(angle) * ux + sin(angle) * vx) + nx * 0.003f
+                val py = desc.centerY + radius * (cos(angle) * uy + sin(angle) * vy) + ny * 0.003f
+                val pz = desc.centerZ + radius * (cos(angle) * uz + sin(angle) * vz) + nz * 0.003f
+                ringPts.add(projectPoint(localToWorld(px, py, pz, anchorPose), w, h))
+            }
+
+            for (i in 0 until 16) {
+                val next = (i + 1) % 16
+                if (ringPts[i] != null && ringPts[next] != null) {
+                    canvas.drawLine(ringPts[i]!!.x, ringPts[i]!!.y, ringPts[next]!!.x, ringPts[next]!!.y, reticlePaint)
+                }
+            }
+
+            val ch = radius * 1.4f
+            val h1 = projectPoint(localToWorld(desc.centerX - ux * ch + nx * 0.003f, desc.centerY - uy * ch + ny * 0.003f, desc.centerZ - uz * ch + nz * 0.003f, anchorPose), w, h)
+            val h2 = projectPoint(localToWorld(desc.centerX + ux * ch + nx * 0.003f, desc.centerY + uy * ch + ny * 0.003f, desc.centerZ + uz * ch + nz * 0.003f, anchorPose), w, h)
+            if (h1 != null && h2 != null) canvas.drawLine(h1.x, h1.y, h2.x, h2.y, reticlePaint)
+
+            val centerPt = projectPoint(localToWorld(desc.centerX + nx * 0.003f, desc.centerY + ny * 0.003f, desc.centerZ + nz * 0.003f, anchorPose), w, h)
+            if (centerPt != null) canvas.drawCircle(centerPt.x, centerPt.y, 14f, fillReticlePaint)
         }
 
         private fun projectPoint(x: Float, y: Float, z: Float, screenW: Float, screenH: Float): PointF? {
