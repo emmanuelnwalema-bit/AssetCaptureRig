@@ -143,7 +143,7 @@ class MainActivity : AppCompatActivity() {
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
@@ -549,7 +549,7 @@ class MainActivity : AppCompatActivity() {
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -560,7 +560,7 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    // --- Squircle 3D Facet Descriptors ---
+    // --- 1. Squircle Facet Descriptors & Alignment Normals ---
 
     data class FacetDesc(
         val centerX: Float, val centerY: Float, val centerZ: Float,
@@ -574,20 +574,20 @@ class MainActivity : AppCompatActivity() {
         val sqrt2Inv = 0.7071f
         val hW = prismWidth / 2f
         val hD = prismDepth / 2f
-        val hMid = prismHeight * 0.55f
-        val hChamferCenter = hMid + (prismHeight - hMid) * 0.5f
+        val hMid = prismHeight * 0.50f
+        val hChamferY = hMid + (prismHeight - hMid) * 0.50f
 
         return when (step) {
             0 -> FacetDesc(0f, hMid * 0.5f, hD, 0f, 0f, 1f, false) // 1. Front (0° Upright)
-            1 -> FacetDesc(hW * 0.72f, hChamferCenter, hD * 0.72f, cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 2. Hero (30° Chamfer)
+            1 -> FacetDesc(hW * 0.76f, hChamferY, hD * 0.76f, cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 2. Hero (30° Corner Fillet Chamfer)
             2 -> FacetDesc(hW, hMid * 0.5f, 0f, 1f, 0f, 0f, false) // 3. Right (0° Upright)
-            3 -> FacetDesc(hW * 0.72f, hChamferCenter, -hD * 0.72f, cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 4. Rear-Right (30° Chamfer)
+            3 -> FacetDesc(hW * 0.76f, hChamferY, -hD * 0.76f, cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 4. Rear-Right (30° Chamfer)
             4 -> FacetDesc(0f, hMid * 0.5f, -hD, 0f, 0f, -1f, false) // 5. Back (0° Upright)
-            5 -> FacetDesc(-hW * 0.72f, hChamferCenter, -hD * 0.72f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 6. Rear-Left (30° Chamfer)
+            5 -> FacetDesc(-hW * 0.76f, hChamferY, -hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 6. Rear-Left (30° Chamfer)
             6 -> FacetDesc(-hW, hMid * 0.5f, 0f, -1f, 0f, 0f, false) // 7. Left (0° Upright)
-            7 -> FacetDesc(-hW * 0.72f, hChamferCenter, hD * 0.72f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 8. Front-Left (30° Chamfer)
-            8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false) // 9. Top Overhead (90° Down)
-            else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)      // 10. Base (60° Up)
+            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 8. Front-Left (30° Chamfer)
+            8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false) // 9. Closed Ceiling Cap (90° Overhead)
+            else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)      // 10. Base (60° Upward)
         }
     }
 
@@ -607,7 +607,7 @@ class MainActivity : AppCompatActivity() {
         return anchorPose.rotateVector(rotated)
     }
 
-    // --- Chamfered Squircle Mesh Overlay ---
+    // --- 2. Fully Filleted Watertight Squircle Mesh Overlay ---
 
     inner class PrismOverlayView(context: Context) : View(context) {
 
@@ -632,7 +632,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         private val centerGuidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(100, 255, 255, 255)
+            color = Color.argb(120, 255, 255, 255)
             style = Paint.Style.STROKE
             strokeWidth = 3f
         }
@@ -671,68 +671,73 @@ class MainActivity : AppCompatActivity() {
             val anchor = prismAnchor ?: return
             val anchorPose = anchor.pose
 
-            // Center Viewport Guide
+            // Screen Center Guide Reticle
             canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, centerGuidePaint)
             canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, centerGuidePaint)
 
-            // 1. Build Discretized Squircle Profiles (12 perimeter points)
+            // Geometry Parameters
             val hW = prismWidth / 2f
             val hD = prismDepth / 2f
-            val r = min(hW, hD) * 0.28f
-            val hMid = prismHeight * 0.55f
+            val r = min(hW, hD) * 0.36f // Prominent corner fillet radius
+            val hMid = prismHeight * 0.50f
             val tan30 = tan(Math.toRadians(30.0)).toFloat()
-            val dChamfer = min((prismHeight - hMid) * tan30, r * 0.90f)
+            val dChamfer = min((prismHeight - hMid) * tan30, r * 0.82f)
+            val rTop = max(r - dChamfer * 0.45f, 0.02f) // Filleted top squircle radius
 
-            val basePtsLocal = generateSquirclePerimeter(hW, hD, r, 0f)
-            val midPtsLocal = generateSquirclePerimeter(hW, hD, r, 0f)
-            val topPtsLocal = generateSquirclePerimeter(hW - dChamfer, hD - dChamfer, r * 0.65f, 0f)
+            // 24-vertex smooth perimeter loops (6 vertices per quadrant: 2 straight bounds + 4 radial arc points)
+            val baseLoop = generateFilletedSquircleLoop(hW, hD, r)
+            val midLoop = generateFilletedSquircleLoop(hW, hD, r)
+            val topLoop = generateFilletedSquircleLoop(hW - dChamfer, hD - dChamfer, rTop)
 
-            val activeStep = if (currentStepIdx < sequence.size) sequence[currentStepIdx] else null
-            val isCurrentChamferTier = activeStep?.targetTilt == 30
+            val greyColor = Color.parseColor("#8B949E")
+            val activeRed = Color.parseColor("#F85149")
+            val capturedGreen = Color.parseColor("#3FB950")
 
-            // 2. Draw Lower Tier (0° Upright Mesh & Facets: 0, 2, 4, 6)
+            // --- 1. RENDER LOWER TIER (y = 0 to h_mid: Upright) ---
             for (sector in 0 until 4) {
+                // A. Upright Flat Wall (ACTIVE: Facets 0, 2, 4, 6)
                 val facetIdx = sector * 2
                 val isCaptured = capturedThumbnails.containsKey(facetIdx)
-                val isActive = currentStepIdx == facetIdx
-
-                val color = when {
-                    isCaptured -> Color.parseColor("#3FB950")
-                    isActive -> if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
-                    !isCurrentChamferTier -> Color.parseColor("#80F85149")
-                    else -> Color.parseColor("#228B949E")
+                val isActiveStep = currentStepIdx == facetIdx
+                val wallColor = when {
+                    isCaptured -> capturedGreen
+                    isActiveStep && isAligned -> capturedGreen
+                    else -> activeRed // Uncaptured active upright walls glow red
                 }
+                drawFilletedWallSector(canvas, sector, baseLoop, midLoop, 0f, hMid, anchorPose, screenW, screenH, wallColor, true)
 
-                drawMeshQuadSector(canvas, sector, basePtsLocal, midPtsLocal, 0f, hMid, anchorPose, screenW, screenH, color, isActive || isCaptured)
+                // B. Upright Filleted Corner Arc (INACTIVE: Structural fillet -> Visible Grey)
+                drawFilletedCornerSector(canvas, sector, baseLoop, midLoop, 0f, hMid, anchorPose, screenW, screenH, greyColor, false)
             }
 
-            // 3. Draw Upper Tier (30° Chamfered Corner Mesh & Facets: 1, 3, 5, 7)
-            for (corner in 0 until 4) {
-                val facetIdx = corner * 2 + 1
+            // --- 2. RENDER UPPER TIER (y = h_mid to prismHeight: 30° Inward Slant) ---
+            for (sector in 0 until 4) {
+                // A. Slanted Cardinal Wall (INACTIVE: Completes watertight loft -> Visible Grey with filleted borders)
+                drawFilletedWallSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, greyColor, false)
+
+                // B. Slanted Corner Chamfer Arc (ACTIVE: Facets 1, 3, 5, 7)
+                val facetIdx = sector * 2 + 1
                 val isCaptured = capturedThumbnails.containsKey(facetIdx)
-                val isActive = currentStepIdx == facetIdx
-
-                val color = when {
-                    isCaptured -> Color.parseColor("#3FB950")
-                    isActive -> if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
-                    isCurrentChamferTier -> Color.parseColor("#80F85149")
-                    else -> Color.parseColor("#228B949E")
+                val isActiveStep = currentStepIdx == facetIdx
+                val chamferColor = when {
+                    isCaptured -> capturedGreen
+                    isActiveStep && isAligned -> capturedGreen
+                    else -> activeRed // Uncaptured active corner chamfers glow red
                 }
-
-                drawMeshCornerSector(canvas, corner, midPtsLocal, topPtsLocal, hMid, prismHeight, anchorPose, screenW, screenH, color, isActive || isCaptured)
+                drawFilletedCornerSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, chamferColor, true)
             }
 
-            // 4. Draw Flat Top Roof Cap (Facet 8)
+            // --- 3. RENDER CLOSED CEILING CAP (ACTIVE: Facet 8 / 90° Overhead) ---
             val isTopCaptured = capturedThumbnails.containsKey(8)
-            val isTopActive = currentStepIdx == 8
+            val isTopActiveStep = currentStepIdx == 8
             val topColor = when {
-                isTopCaptured -> Color.parseColor("#3FB950")
-                isTopActive -> if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
-                else -> Color.parseColor("#308B949E")
+                isTopCaptured -> capturedGreen
+                isTopActiveStep && isAligned -> capturedGreen
+                else -> activeRed // Active ceiling cap: glows red until captured
             }
-            drawTopCap(canvas, topPtsLocal, prismHeight, anchorPose, screenW, screenH, topColor)
+            drawTopCap(canvas, topLoop, prismHeight, anchorPose, screenW, screenH, topColor, true)
 
-            // 5. Render Active 3D Planar Reticle
+            // --- 4. RENDER 3D PLANAR RETICLE ON ACTIVE TARGET ---
             if (currentStepIdx < sequence.size) {
                 val desc = getFacetDescriptor(currentStepIdx)
                 val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
@@ -750,43 +755,44 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        private fun generateSquirclePerimeter(hW: Float, hD: Float, r: Float, y: Float): List<FloatArray> {
-            val pts = mutableListOf<FloatArray>()
-            val xStraight = hW - r
-            val zStraight = hD - r
+        // Generates 24 smoothly filleted boundary vertices (6 per quadrant: 2 straight bounds + 4 radial arc points)
+        private fun generateFilletedSquircleLoop(hW: Float, hD: Float, r: Float): List<FloatArray> {
+            val loop = mutableListOf<FloatArray>()
+            val xS = hW - r
+            val zS = hD - r
 
-            // Cardinal Front (+Z)
-            pts.add(floatArrayOf(-xStraight, y, hD))
-            pts.add(floatArrayOf(xStraight, y, hD))
-            // Front-Right Corner Arc
-            pts.add(floatArrayOf(xStraight + r * 0.7071f, y, zStraight + r * 0.7071f))
-            // Cardinal Right (+X)
-            pts.add(floatArrayOf(hW, y, zStraight))
-            pts.add(floatArrayOf(hW, y, -zStraight))
-            // Rear-Right Corner Arc
-            pts.add(floatArrayOf(xStraight + r * 0.7071f, y, -zStraight - r * 0.7071f))
-            // Cardinal Back (-Z)
-            pts.add(floatArrayOf(xStraight, y, -hD))
-            pts.add(floatArrayOf(-xStraight, y, -hD))
-            // Rear-Left Corner Arc
-            pts.add(floatArrayOf(-xStraight - r * 0.7071f, y, -zStraight - r * 0.7071f))
-            // Cardinal Left (-X)
-            pts.add(floatArrayOf(-hW, y, -zStraight))
-            pts.add(floatArrayOf(-hW, y, zStraight))
-            // Front-Left Corner Arc
-            pts.add(floatArrayOf(-xStraight - r * 0.7071f, y, zStraight + r * 0.7071f))
+            for (quad in 0 until 4) {
+                // Add cardinal straight section endpoints
+                when (quad) {
+                    0 -> { loop.add(floatArrayOf(-xS, 0f, hD)); loop.add(floatArrayOf(xS, 0f, hD)) }
+                    1 -> { loop.add(floatArrayOf(hW, 0f, zS)); loop.add(floatArrayOf(hW, 0f, -zS)) }
+                    2 -> { loop.add(floatArrayOf(xS, 0f, -hD)); loop.add(floatArrayOf(-xS, 0f, -hD)) }
+                    3 -> { loop.add(floatArrayOf(-hW, 0f, -zS)); loop.add(floatArrayOf(-hW, 0f, zS)) }
+                }
 
-            return pts
+                // Add 4 smooth radial fillet vertices around the rounded corner
+                val cX = if (quad == 0 || quad == 1) xS else -xS
+                val cZ = if (quad == 0 || quad == 3) zS else -zS
+                val startAngle = Math.toRadians((90.0 - quad * 90.0))
+
+                for (step in 1..4) {
+                    val angle = startAngle - (Math.PI / 2.0) * (step / 5.0)
+                    val px = cX + r * cos(angle).toFloat()
+                    val pz = cZ + r * sin(angle).toFloat()
+                    loop.add(floatArrayOf(px, 0f, pz))
+                }
+            }
+            return loop
         }
 
-        private fun drawMeshQuadSector(
+        private fun drawFilletedWallSector(
             canvas: Canvas, sector: Int,
             base: List<FloatArray>, top: List<FloatArray>,
             y0: Float, y1: Float,
             anchorPose: com.google.ar.core.Pose,
-            w: Float, h: Float, color: Int, fill: Boolean
+            w: Float, h: Float, color: Int, isActive: Boolean
         ) {
-            val i0 = (sector * 3) % base.size
+            val i0 = sector * 6
             val i1 = (i0 + 1) % base.size
 
             val p0 = projectPoint(localToWorld(base[i0][0], y0, base[i0][2], anchorPose), w, h)
@@ -795,66 +801,100 @@ class MainActivity : AppCompatActivity() {
             val p3 = projectPoint(localToWorld(top[i0][0], y1, top[i0][2], anchorPose), w, h)
 
             if (p0 != null && p1 != null && p2 != null && p3 != null) {
-                if (fill) {
-                    facetPaint.color = Color.argb(45, Color.red(color), Color.green(color), Color.blue(color))
-                    val path = Path().apply {
-                        moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
-                    }
-                    canvas.drawPath(path, facetPaint)
+                val alpha = if (isActive) 50 else 22
+                facetPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+                val path = Path().apply {
+                    moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
                 }
+                canvas.drawPath(path, facetPaint)
 
                 wirePaint.color = color
+                wirePaint.strokeWidth = if (isActive) 3.5f else 2.2f
                 canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
                 canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
                 canvas.drawLine(p2.x, p2.y, p3.x, p3.y, wirePaint)
                 canvas.drawLine(p3.x, p3.y, p0.x, p0.y, wirePaint)
 
-                val midBase = projectPoint(localToWorld((base[i0][0] + base[i1][0]) / 2f, y0, (base[i0][2] + base[i1][2]) / 2f, anchorPose), w, h)
-                val midTop = projectPoint(localToWorld((top[i0][0] + top[i1][0]) / 2f, y1, (top[i0][2] + top[i1][2]) / 2f, anchorPose), w, h)
-                if (midBase != null && midTop != null) canvas.drawLine(midBase.x, midBase.y, midTop.x, midTop.y, wirePaint)
+                // Subdivided central mesh rib
+                val pMidB = projectPoint(localToWorld((base[i0][0] + base[i1][0]) / 2f, y0, (base[i0][2] + base[i1][2]) / 2f, anchorPose), w, h)
+                val pMidT = projectPoint(localToWorld((top[i0][0] + top[i1][0]) / 2f, y1, (top[i0][2] + top[i1][2]) / 2f, anchorPose), w, h)
+                if (pMidB != null && pMidT != null) canvas.drawLine(pMidB.x, pMidB.y, pMidT.x, pMidT.y, wirePaint)
             }
         }
 
-        private fun drawMeshCornerSector(
+        private fun drawFilletedCornerSector(
             canvas: Canvas, corner: Int,
             base: List<FloatArray>, top: List<FloatArray>,
             y0: Float, y1: Float,
             anchorPose: com.google.ar.core.Pose,
+            w: Float, h: Float, color: Int, isActive: Boolean
+        ) {
+            val startIdx = corner * 6 + 1
+            wirePaint.color = color
+            wirePaint.strokeWidth = if (isActive) 3.5f else 2.0f
+            val alpha = if (isActive) 55 else 18
+            facetPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+
+            // Subdivide the rounded corner quadrant into 5 smooth filleted micro-quads
+            for (step in 0 until 5) {
+                val iA = (startIdx + step) % base.size
+                val iB = (startIdx + step + 1) % base.size
+
+                val p0 = projectPoint(localToWorld(base[iA][0], y0, base[iA][2], anchorPose), w, h)
+                val p1 = projectPoint(localToWorld(base[iB][0], y0, base[iB][2], anchorPose), w, h)
+                val p2 = projectPoint(localToWorld(top[iB][0], y1, top[iB][2], anchorPose), w, h)
+                val p3 = projectPoint(localToWorld(top[iA][0], y1, top[iA][2], anchorPose), w, h)
+
+                if (p0 != null && p1 != null && p2 != null && p3 != null) {
+                    val path = Path().apply {
+                        moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
+                    }
+                    canvas.drawPath(path, facetPaint)
+
+                    canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
+                    canvas.drawLine(p1.x, p1.y, p2.x, p2.y, wirePaint)
+                    canvas.drawLine(p2.x, p2.y, p3.x, p3.y, wirePaint)
+                    canvas.drawLine(p3.x, p3.y, p0.x, p0.y, wirePaint)
+                }
+            }
+        }
+
+        private fun drawTopCap(
+            canvas: Canvas, top: List<FloatArray>, y: Float,
+            anchorPose: com.google.ar.core.Pose,
             w: Float, h: Float, color: Int, fill: Boolean
         ) {
-            val i0 = (corner * 3 + 1) % base.size
-            val i1 = (i0 + 1) % base.size
-            val i2 = (i0 + 2) % base.size
+            val pts = top.map { projectPoint(localToWorld(it[0], y, it[2], anchorPose), w, h) }
+            if (pts.all { it != null }) {
+                val isTopCaptured = capturedThumbnails.containsKey(8)
+                val isTopActiveStep = currentStepIdx == 8
+                val isActive = isTopCaptured || isTopActiveStep
 
-            val p0 = projectPoint(localToWorld(base[i1][0], y0, base[i1][2], anchorPose), w, h)
-            val pTop = projectPoint(localToWorld(top[i1][0], y1, top[i1][2], anchorPose), w, h)
-            val pBaseL = projectPoint(localToWorld(base[i0][0], y0, base[i0][2], anchorPose), w, h)
-            val pBaseR = projectPoint(localToWorld(base[i2][0], y0, base[i2][2], anchorPose), w, h)
-
-            if (p0 != null && pTop != null && pBaseL != null && pBaseR != null) {
                 if (fill) {
-                    facetPaint.color = Color.argb(55, Color.red(color), Color.green(color), Color.blue(color))
+                    val alpha = if (isActive) 55 else 30
+                    facetPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
                     val path = Path().apply {
-                        moveTo(pBaseL.x, pBaseL.y); lineTo(pBaseR.x, pBaseR.y); lineTo(pTop.x, pTop.y); close()
+                        moveTo(pts[0]!!.x, pts[0]!!.y)
+                        for (i in 1 until pts.size) lineTo(pts[i]!!.x, pts[i]!!.y)
+                        close()
                     }
                     canvas.drawPath(path, facetPaint)
                 }
 
                 wirePaint.color = color
-                canvas.drawLine(pBaseL.x, pBaseL.y, pTop.x, pTop.y, wirePaint)
-                canvas.drawLine(pBaseR.x, pBaseR.y, pTop.x, pTop.y, wirePaint)
-                canvas.drawLine(p0.x, p0.y, pTop.x, pTop.y, wirePaint)
-            }
-        }
-
-        private fun drawTopCap(canvas: Canvas, top: List<FloatArray>, y: Float, anchorPose: com.google.ar.core.Pose, w: Float, h: Float, color: Int) {
-            val pts = top.map { projectPoint(localToWorld(it[0], y, it[2], anchorPose), w, h) }
-            if (pts.all { it != null }) {
-                wirePaint.color = color
+                wirePaint.strokeWidth = if (isActive) 3.5f else 2.5f
                 for (i in pts.indices) {
                     val next = (i + 1) % pts.size
                     canvas.drawLine(pts[i]!!.x, pts[i]!!.y, pts[next]!!.x, pts[next]!!.y, wirePaint)
                 }
+
+                // Internal rounded ceiling cross grid
+                val p0 = pts[0]
+                val pMid = pts[pts.size / 2]
+                if (p0 != null && pMid != null) canvas.drawLine(p0.x, p0.y, pMid.x, pMid.y, wirePaint)
+                val pQuarter = pts[pts.size / 4]
+                val pThreeQuarter = pts[(pts.size * 3) / 4]
+                if (pQuarter != null && pThreeQuarter != null) canvas.drawLine(pQuarter.x, pQuarter.y, pThreeQuarter.x, pThreeQuarter.y, wirePaint)
             }
         }
 
