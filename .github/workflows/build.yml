@@ -24,26 +24,11 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Cache Debug Keystore
+      - name: Restore Android Keystore Cache
         uses: actions/cache@v4
-        id: debug-keystore-cache
         with:
-          path: ~/.android/debug.keystore
-          key: assetcapturerig-persistent-debug-keystore
-
-      - name: Generate Persistent Debug Keystore if missing
-        if: steps.debug-keystore-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/.android
-          keytool -genkey -v \
-            -keystore ~/.android/debug.keystore \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          path: ~/.android
+          key: android-debug-keystore-v1
 
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
