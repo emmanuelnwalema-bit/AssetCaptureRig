@@ -11,6 +11,7 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.view.PixelCopy
+import android.view.SurfaceView
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
@@ -18,7 +19,7 @@ import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.TrackingState
-import io.github.sceneview.ar.ARSceneView
+import io.github.sceneview.ar.ArSceneView
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -34,7 +35,7 @@ import kotlin.math.*
 class MainActivity : AppCompatActivity() {
 
     private lateinit var rootLayout: FrameLayout
-    private lateinit var sceneView: ARSceneView
+    private lateinit var sceneView: ArSceneView
     private lateinit var overlayView: PrismOverlayView
     private lateinit var snapFlash: View
 
@@ -149,20 +150,20 @@ class MainActivity : AppCompatActivity() {
 
         try {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
 
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
 
         buildThumbnailStrip()
 
-        sceneView.sessionConfiguration = { _, config ->
+        sceneView.sessionConfiguration = { session, config ->
             config.focusMode = Config.FocusMode.AUTO
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
             config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
         }
 
-        sceneView.onSessionUpdated = { _, frame ->
+        sceneView.onSessionUpdated = { session, frame ->
             lastFrame = frame
             onTrackingFrame(frame)
         }
@@ -301,7 +302,6 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
-            // 1. Initial Point Cloud fit
             autoFitToObjectPointCloud(frame, anchor)
 
             sceneView.planeRenderer.isEnabled = false
@@ -317,7 +317,6 @@ class MainActivity : AppCompatActivity() {
             updateScaleLabels()
             overlayView.postInvalidate()
 
-            // 2. Query DeepSeek V4.1 Flash for canonical heading alignment
             triggerVlmOrientationAnalysis()
         } else {
             Toast.makeText(this, "Pan phone to scan table surface first", Toast.LENGTH_SHORT).show()
@@ -386,7 +385,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- Vision-Language Model Heading Realignment (DeepSeek V4.1 Flash) ---
     private fun triggerVlmOrientationAnalysis() {
         val apiKey = BuildConfig.DASHSCOPE_API_KEY
         if (apiKey.isEmpty()) {
@@ -398,23 +396,33 @@ class MainActivity : AppCompatActivity() {
         distIndicator.setTextColor(Color.parseColor("#58A6FF"))
 
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
-        PixelCopy.request(sceneView, bitmap, { copyResult ->
-            if (copyResult == PixelCopy.SUCCESS) {
-                Thread {
-                    try {
-                        val stream = ByteArrayOutputStream()
-                        val scale = 640f / max(bitmap.width, bitmap.height)
-                        val scaled = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt(), (bitmap.height * scale).roundToInt(), true)
-                        scaled.compress(Bitmap.CompressFormat.JPEG, 85, stream)
-                        val b64 = Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+        PixelCopy.request(
+            sceneView as SurfaceView,
+            bitmap,
+            PixelCopy.OnPixelCopyFinishedListener { copyResult ->
+                if (copyResult == PixelCopy.SUCCESS) {
+                    Thread {
+                        try {
+                            val stream = ByteArrayOutputStream()
+                            val scale = 640f / max(bitmap.width, bitmap.height)
+                            val scaled = Bitmap.createScaledBitmap(
+                                bitmap,
+                                (bitmap.width * scale).roundToInt(),
+                                (bitmap.height * scale).roundToInt(),
+                                true
+                            )
+                            scaled.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                            val b64 = Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
 
-                        queryQwenCloudPoseAnalysis(b64, apiKey)
-                    } catch (e: Exception) {
-                        Log.e("VLM", "Error preparing image for VLM: ${e.message}")
-                    }
-                }.start()
-            }
-        }, Handler(Looper.getMainLooper()))
+                            queryQwenCloudPoseAnalysis(b64, apiKey)
+                        } catch (e: Exception) {
+                            Log.e("VLM", "Error preparing image for VLM: ${e.message}")
+                        }
+                    }.start()
+                }
+            },
+            Handler(Looper.getMainLooper())
+        )
     }
 
     private fun queryQwenCloudPoseAnalysis(base64Image: String, apiKey: String) {
@@ -539,14 +547,12 @@ class MainActivity : AppCompatActivity() {
         val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
         val faceNormalWorld = normalToWorld(desc.normX, desc.normY, desc.normZ, anchorPose)
 
-        // 1. Backface Culling check
         val camToFaceX = camPose.tx() - faceCenterWorld[0]
         val camToFaceY = camPose.ty() - faceCenterWorld[1]
         val camToFaceZ = camPose.tz() - faceCenterWorld[2]
         val facingDot = camToFaceX * faceNormalWorld[0] + camToFaceY * faceNormalWorld[1] + camToFaceZ * faceNormalWorld[2]
         val isFacingCamera = facingDot > 0.001f
 
-        // 2. Focal Distance
         val toFaceVecX = faceCenterWorld[0] - camPose.tx()
         val toFaceVecY = faceCenterWorld[1] - camPose.ty()
         val toFaceVecZ = faceCenterWorld[2] - camPose.tz()
@@ -557,12 +563,10 @@ class MainActivity : AppCompatActivity() {
         val camForward = floatArrayOf(-camPose.zAxis[0], -camPose.zAxis[1], -camPose.zAxis[2])
         val actualTiltDeg = Math.toDegrees(asin((-camForward[1]).coerceIn(-1.0f, 1.0f).toDouble())).roundToInt()
 
-        // 3. Collimation Alignment Error
         val dotNormal = -(camForward[0] * faceNormalWorld[0] + camForward[1] * faceNormalWorld[1] + camForward[2] * faceNormalWorld[2])
         val normAngleErr = Math.toDegrees(acos(dotNormal.coerceIn(-1.0f, 1.0f).toDouble())).toFloat()
         val isNormalAligned = isFacingCamera && (normAngleErr <= 10.0f)
 
-        // 4. Centering Angle
         val safeDist = if (distMeters > 0.001f) distMeters else 1.0f
         val toFaceDirX = toFaceVecX / safeDist
         val toFaceDirY = toFaceVecY / safeDist
@@ -641,52 +645,57 @@ class MainActivity : AppCompatActivity() {
         playSnapFeedback()
 
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
-        PixelCopy.request(sceneView, bitmap, { copyResult ->
-            if (copyResult == PixelCopy.SUCCESS) {
-                Thread {
-                    try {
-                        val file = File(cacheDir, "plate_${step.id}.jpg")
-                        val fos = FileOutputStream(file)
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 95, fos)
-                        fos.flush()
-                        fos.close()
+        PixelCopy.request(
+            sceneView as SurfaceView,
+            bitmap,
+            PixelCopy.OnPixelCopyFinishedListener { copyResult ->
+                if (copyResult == PixelCopy.SUCCESS) {
+                    Thread {
+                        try {
+                            val file = File(cacheDir, "plate_${step.id}.jpg")
+                            val fos = FileOutputStream(file)
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+                            fos.flush()
+                            fos.close()
 
-                        val thumb = Bitmap.createScaledBitmap(bitmap, 128, 128, false)
-                        capturedThumbnails[snappedStepIdx] = thumb
+                            val thumb = Bitmap.createScaledBitmap(bitmap, 128, 128, false)
+                            capturedThumbnails[snappedStepIdx] = thumb
 
-                        runOnUiThread {
-                            previewCardViews[snappedStepIdx].setImageBitmap(thumb)
+                            runOnUiThread {
+                                previewCardViews[snappedStepIdx].setImageBitmap(thumb)
 
-                            currentStepIdx++
-                            isCapturing = false
-                            cooldownUntil = System.currentTimeMillis() + 800L
-                            alignStartTime = null
-                            updateChecklistUI()
+                                currentStepIdx++
+                                isCapturing = false
+                                cooldownUntil = System.currentTimeMillis() + 800L
+                                alignStartTime = null
+                                updateChecklistUI()
 
-                            if (currentStepIdx >= sequence.size) {
-                                targetBadge.text = "✓ ALL 10 PLATES STORED LOCALLY"
-                                targetBadge.setTextColor(Color.parseColor("#3FB950"))
-                                distIndicator.text = "CAPTURE COMPLETE"
-                                distIndicator.setTextColor(Color.parseColor("#3FB950"))
-                                normalIndicator.text = "READY FOR MODAL BATCH UPLOAD"
-                                centerIndicator.text = "TAP UPLOAD BELOW"
-                                forceSnapBtn.visibility = View.GONE
-                                scaleBar.visibility = View.GONE
-                            } else {
-                                targetBadge.text = sequence[currentStepIdx].label
-                                forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
+                                if (currentStepIdx >= sequence.size) {
+                                    targetBadge.text = "✓ ALL 10 PLATES STORED LOCALLY"
+                                    targetBadge.setTextColor(Color.parseColor("#3FB950"))
+                                    distIndicator.text = "CAPTURE COMPLETE"
+                                    distIndicator.setTextColor(Color.parseColor("#3FB950"))
+                                    normalIndicator.text = "READY FOR MODAL BATCH UPLOAD"
+                                    centerIndicator.text = "TAP UPLOAD BELOW"
+                                    forceSnapBtn.visibility = View.GONE
+                                    scaleBar.visibility = View.GONE
+                                } else {
+                                    targetBadge.text = sequence[currentStepIdx].label
+                                    forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
+                                }
+                                overlayView.postInvalidate()
                             }
-                            overlayView.postInvalidate()
+                        } catch (e: Exception) {
+                            Log.e("Capture", "Error saving plate locally", e)
+                            isCapturing = false
                         }
-                    } catch (e: Exception) {
-                        Log.e("Capture", "Error saving plate locally", e)
-                        isCapturing = false
-                    }
-                }.start()
-            } else {
-                isCapturing = false
-            }
-        }, Handler(Looper.getMainLooper()))
+                    }.start()
+                } else {
+                    isCapturing = false
+                }
+            },
+            Handler(Looper.getMainLooper())
+        )
     }
 
     private fun startBatchUpload() {
@@ -698,7 +707,8 @@ class MainActivity : AppCompatActivity() {
             val total = capturedThumbnails.size
             var uploaded = 0
 
-            for ((idx, _) in capturedThumbnails.entries.sortedBy { it.key }) {
+            for (entry in capturedThumbnails.entries.sortedBy { it.key }) {
+                val idx = entry.key
                 val step = sequence[idx]
                 val file = File(cacheDir, "plate_${step.id}.jpg")
                 if (!file.exists()) continue
@@ -744,7 +754,7 @@ class MainActivity : AppCompatActivity() {
     private fun playSnapFeedback() {
         try {
             toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
 
         snapFlash.alpha = 0.5f
         snapFlash.visibility = View.VISIBLE
@@ -754,8 +764,6 @@ class MainActivity : AppCompatActivity() {
             .withEndAction { snapFlash.visibility = View.GONE }
             .start()
     }
-
-    // --- 1. Squircle Facet Descriptors & Alignment Normals ---
 
     data class FacetDesc(
         val centerX: Float, val centerY: Float, val centerZ: Float,
@@ -801,8 +809,6 @@ class MainActivity : AppCompatActivity() {
         val rotated = rotateByAzimuth(nx, ny, nz)
         return anchorPose.rotateVector(rotated)
     }
-
-    // --- 2. Perforated Metal Mesh Squircle Overlay ---
 
     inner class PrismOverlayView(context: Context) : View(context) {
 
