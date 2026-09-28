@@ -301,7 +301,6 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
-            // 1. Initial point cloud auto-fit
             autoFitToObjectPointCloud(frame, anchor)
 
             sceneView.planeRenderer.isEnabled = false
@@ -317,7 +316,6 @@ class MainActivity : AppCompatActivity() {
             updateScaleLabels()
             overlayView.postInvalidate()
 
-            // 2. Query DeepSeek V4.1 Flash for canonical heading alignment
             triggerVlmOrientationAnalysis()
         } else {
             Toast.makeText(this, "Pan phone to scan table surface first", Toast.LENGTH_SHORT).show()
