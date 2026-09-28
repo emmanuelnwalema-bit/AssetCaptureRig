@@ -20,6 +20,7 @@ import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ArSceneView
+import io.github.sceneview.ar.arcore.ArFrame
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -157,13 +158,16 @@ class MainActivity : AppCompatActivity() {
 
         buildThumbnailStrip()
 
-        sceneView.sessionConfiguration = { session, config ->
-            config.focusMode = Config.FocusMode.AUTO
-            config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
-            config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
+        sceneView.onSessionCreated = { session ->
+            val config = Config(session)
+            config.setFocusMode(Config.FocusMode.AUTO)
+            config.setPlaneFindingMode(Config.PlaneFindingMode.HORIZONTAL)
+            config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE)
+            session.configure(config)
         }
 
-        sceneView.onSessionUpdated = { session, frame ->
+        sceneView.onArFrame = { arFrame ->
+            val frame = arFrame.frame
             lastFrame = frame
             onTrackingFrame(frame)
         }
@@ -788,7 +792,7 @@ class MainActivity : AppCompatActivity() {
             4 -> FacetDesc(0f, hMid * 0.5f, -hD, 0f, 0f, -1f, false)
             5 -> FacetDesc(-hW * 0.76f, hChamferY, -hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
             6 -> FacetDesc(-hW, hMid * 0.5f, 0f, -1f, 0f, 0f, false)
-            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
+            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true)
             8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false)
             else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)
         }
