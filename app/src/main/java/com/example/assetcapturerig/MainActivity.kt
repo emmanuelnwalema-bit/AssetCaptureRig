@@ -22,6 +22,7 @@ import io.github.sceneview.ar.ARSceneView
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -66,6 +67,11 @@ class MainActivity : AppCompatActivity() {
 
     private val httpClient = OkHttpClient()
     private val modalEndpoint = "https://emmanuelnwalema--mobile-6dof-capture-ui.modal.run/upload_plate"
+    
+    // QwenCloud / DeepSeek V4.1 Flash Configuration
+    private val vlmBaseUrl = "https://maas.qwencloudapi.com/compatible-mode/v1/chat/completions"
+    private val vlmModelName = "deepseek-v4.1-flash"
+
     private var toneGen: ToneGenerator? = null
 
     private var currentStepIdx = 0
@@ -295,6 +301,9 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
+            // 1. Initial Point Cloud fit
+            autoFitToObjectPointCloud(frame, anchor)
+
             sceneView.planeRenderer.isEnabled = false
             sceneView.planeRenderer.isVisible = false
 
@@ -305,10 +314,196 @@ class MainActivity : AppCompatActivity() {
             forceSnapBtn.text = "FORCE SNAP [${sequence[currentStepIdx].id.uppercase(Locale.US)}]"
             targetBadge.text = sequence[currentStepIdx].label
             updateChecklistUI()
+            updateScaleLabels()
             overlayView.postInvalidate()
+
+            // 2. Query DeepSeek V4.1 Flash for canonical heading alignment
+            triggerVlmOrientationAnalysis()
         } else {
             Toast.makeText(this, "Pan phone to scan table surface first", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun autoFitToObjectPointCloud(frame: Frame, anchor: Anchor) {
+        try {
+            val pointCloud = frame.acquirePointCloud()
+            val pointsBuffer = pointCloud.points
+            val count = pointsBuffer.remaining() / 4
+            val anchorPose = anchor.pose
+            val invAnchor = anchorPose.inverse()
+
+            val cosA = cos(-initialAzimuth)
+            val sinA = sin(-initialAzimuth)
+
+            var minX = Float.MAX_VALUE
+            var maxX = -Float.MAX_VALUE
+            var minZ = Float.MAX_VALUE
+            var maxZ = -Float.MAX_VALUE
+            var maxY = 0.0f
+            var clusterCount = 0
+
+            for (i in 0 until count) {
+                val wx = pointsBuffer.get(i * 4)
+                val wy = pointsBuffer.get(i * 4 + 1)
+                val wz = pointsBuffer.get(i * 4 + 2)
+                val conf = pointsBuffer.get(i * 4 + 3)
+
+                if (conf < 0.20f) continue
+
+                val pLocal = invAnchor.transformPoint(floatArrayOf(wx, wy, wz))
+                val lx = pLocal[0]
+                val ly = pLocal[1]
+                val lz = pLocal[2]
+
+                val rx = lx * cosA + lz * sinA
+                val rz = -lx * sinA + lz * cosA
+
+                val horizontalDist = sqrt(rx * rx + rz * rz)
+                if (ly in 0.015f..0.50f && horizontalDist <= 0.35f) {
+                    minX = min(minX, rx)
+                    maxX = max(maxX, rx)
+                    minZ = min(minZ, rz)
+                    maxZ = max(maxZ, rz)
+                    maxY = max(maxY, ly)
+                    clusterCount++
+                }
+            }
+
+            pointCloud.close()
+
+            if (clusterCount >= 6 && minX < maxX && minZ < maxZ && maxY > 0.02f) {
+                val spanX = (maxX - minX) * 1.15f + 0.02f
+                val spanZ = (maxZ - minZ) * 1.15f + 0.02f
+                val spanY = maxY * 1.15f + 0.015f
+
+                val maxDim = max(spanX, spanZ)
+                prismWidth = maxDim.coerceIn(0.08f, 0.45f)
+                prismDepth = maxDim.coerceIn(0.08f, 0.45f)
+                prismHeight = spanY.coerceIn(0.05f, 0.35f)
+            }
+        } catch (e: Exception) {
+            Log.e("AutoFit", "Point cloud auto-dimensioning skipped: ${e.message}")
+        }
+    }
+
+    // --- Vision-Language Model Heading Realignment (DeepSeek V4.1 Flash) ---
+    private fun triggerVlmOrientationAnalysis() {
+        val apiKey = BuildConfig.DASHSCOPE_API_KEY
+        if (apiKey.isEmpty()) {
+            Log.d("VLM", "DASHSCOPE_API_KEY not configured in build. Skipping AI alignment.")
+            return
+        }
+
+        distIndicator.text = "AI ALIGNING ASSET ORIENTATION..."
+        distIndicator.setTextColor(Color.parseColor("#58A6FF"))
+
+        val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
+        PixelCopy.request(sceneView, bitmap, { copyResult ->
+            if (copyResult == PixelCopy.SUCCESS) {
+                Thread {
+                    try {
+                        val stream = ByteArrayOutputStream()
+                        val scale = 640f / max(bitmap.width, bitmap.height)
+                        val scaled = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt(), (bitmap.height * scale).roundToInt(), true)
+                        scaled.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                        val b64 = Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+
+                        queryQwenCloudPoseAnalysis(b64, apiKey)
+                    } catch (e: Exception) {
+                        Log.e("VLM", "Error preparing image for VLM: ${e.message}")
+                    }
+                }.start()
+            }
+        }, Handler(Looper.getMainLooper()))
+    }
+
+    private fun queryQwenCloudPoseAnalysis(base64Image: String, apiKey: String) {
+        val prompt = "You are a 3D computer-vision engine for an AR 6DoF capture rig. " +
+                "Inspect the physical object placed in the center of the frame resting on the surface. " +
+                "Determine the canonical 'FRONT' orientation of the object. " +
+                "Output the clockwise yaw rotation offset in degrees (-180 to 180) needed to align the camera optical vector perpendicularly to the object's canonical front face. " +
+                "Also estimate the width-to-depth aspect ratio of the object's footprint. " +
+                "Output ONLY a raw JSON object with keys: yaw_offset_deg (float), aspect_ratio (float, default 1.0), object_name (string)."
+
+        val json = JSONObject().apply {
+            put("model", vlmModelName)
+            put("temperature", 0.1)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("type", "image_url")
+                            put("image_url", JSONObject().apply {
+                                put("url", "data:image/jpeg;base64,$base64Image")
+                            })
+                        })
+                        put(JSONObject().apply {
+                            put("type", "text")
+                            put("text", prompt)
+                        })
+                    })
+                })
+            })
+        }
+
+        val body = json.toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url(vlmBaseUrl)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(body)
+            .build()
+
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.e("VLM", "DeepSeek V4.1 Flash API request failed: ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val resStr = response.body?.string() ?: ""
+                response.close()
+                try {
+                    val root = JSONObject(resStr)
+                    val rawContent = root.getJSONArray("choices")
+                        .getJSONObject(0)
+                        .getJSONObject("message")
+                        .getString("content")
+
+                    val cleanJsonStr = rawContent
+                        .substringAfter("```json", rawContent)
+                        .substringBeforeLast("```")
+                        .trim()
+
+                    val result = JSONObject(cleanJsonStr)
+                    val yawOffset = result.optDouble("yaw_offset_deg", 0.0).toFloat()
+                    val aspectRatio = result.optDouble("aspect_ratio", 1.0).toFloat().coerceIn(0.5f, 2.0f)
+                    val objectName = result.optString("object_name", "Asset")
+
+                    runOnUiThread {
+                        initialAzimuth += Math.toRadians(yawOffset.toDouble()).toFloat()
+
+                        if (aspectRatio > 1.05f) {
+                            prismWidth *= sqrt(aspectRatio)
+                            prismDepth /= sqrt(aspectRatio)
+                        } else if (aspectRatio < 0.95f) {
+                            prismWidth /= sqrt(1f / aspectRatio)
+                            prismDepth *= sqrt(1f / aspectRatio)
+                        }
+
+                        updateScaleLabels()
+                        overlayView.postInvalidate()
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "AI Aligned to $objectName: ${if (yawOffset >= 0) "+" else ""}${String.format(Locale.US, "%.1f", yawOffset)}°",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } catch (e: Exception) {
+                    Log.e("VLM", "Error parsing VLM response: ${e.message}")
+                }
+            }
+        })
     }
 
     private fun onTrackingFrame(frame: Frame) {
@@ -578,16 +773,16 @@ class MainActivity : AppCompatActivity() {
         val hChamferY = hMid + (prismHeight - hMid) * 0.50f
 
         return when (step) {
-            0 -> FacetDesc(0f, hMid * 0.5f, hD, 0f, 0f, 1f, false) // 1. Front (0° Upright)
-            1 -> FacetDesc(hW * 0.76f, hChamferY, hD * 0.76f, cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 2. Hero (30° Corner Fillet Chamfer)
-            2 -> FacetDesc(hW, hMid * 0.5f, 0f, 1f, 0f, 0f, false) // 3. Right (0° Upright)
-            3 -> FacetDesc(hW * 0.76f, hChamferY, -hD * 0.76f, cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 4. Rear-Right (30° Chamfer)
-            4 -> FacetDesc(0f, hMid * 0.5f, -hD, 0f, 0f, -1f, false) // 5. Back (0° Upright)
-            5 -> FacetDesc(-hW * 0.76f, hChamferY, -hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true) // 6. Rear-Left (30° Chamfer)
-            6 -> FacetDesc(-hW, hMid * 0.5f, 0f, -1f, 0f, 0f, false) // 7. Left (0° Upright)
-            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true) // 8. Front-Left (30° Chamfer)
-            8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false) // 9. Closed Ceiling Cap (90° Overhead)
-            else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)      // 10. Base (60° Upward)
+            0 -> FacetDesc(0f, hMid * 0.5f, hD, 0f, 0f, 1f, false)
+            1 -> FacetDesc(hW * 0.76f, hChamferY, hD * 0.76f, cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true)
+            2 -> FacetDesc(hW, hMid * 0.5f, 0f, 1f, 0f, 0f, false)
+            3 -> FacetDesc(hW * 0.76f, hChamferY, -hD * 0.76f, cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
+            4 -> FacetDesc(0f, hMid * 0.5f, -hD, 0f, 0f, -1f, false)
+            5 -> FacetDesc(-hW * 0.76f, hChamferY, -hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
+            6 -> FacetDesc(-hW, hMid * 0.5f, 0f, -1f, 0f, 0f, false)
+            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
+            8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false)
+            else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)
         }
     }
 
@@ -641,7 +836,6 @@ class MainActivity : AppCompatActivity() {
         private val projMatrix = FloatArray(16)
         private val vpMatrix = FloatArray(16)
 
-        // Cached Perforated Metal Mesh Shaders
         private val redMeshShader = createPerforatedShader(Color.parseColor("#F85149"))
         private val greenMeshShader = createPerforatedShader(Color.parseColor("#3FB950"))
         private val greyMeshShader = createPerforatedShader(Color.parseColor("#8B949E"))
@@ -651,26 +845,22 @@ class MainActivity : AppCompatActivity() {
             val bmp = Bitmap.createBitmap(tileSize, tileSize, Bitmap.Config.ARGB_8888)
             val cv = Canvas(bmp)
 
-            // 1. Semi-translucent colored sheet metal body
             val bodyPaint = Paint().apply {
                 color = Color.argb(175, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
                 style = Paint.Style.FILL
             }
             cv.drawRect(0f, 0f, tileSize.toFloat(), tileSize.toFloat(), bodyPaint)
 
-            // 2. Punch true transparent circular holes
             val clearHolePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
             }
             val holeR = 5.2f
-            // Staggered perforated pattern: center hole + 4 quadrant corners
             cv.drawCircle(tileSize / 2f, tileSize / 2f, holeR, clearHolePaint)
             cv.drawCircle(0f, 0f, holeR, clearHolePaint)
             cv.drawCircle(tileSize.toFloat(), 0f, holeR, clearHolePaint)
             cv.drawCircle(0f, tileSize.toFloat(), holeR, clearHolePaint)
             cv.drawCircle(tileSize.toFloat(), tileSize.toFloat(), holeR, clearHolePaint)
 
-            // 3. Stamped metallic rim highlight around holes
             val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.argb(90, 255, 255, 255)
                 style = Paint.Style.STROKE
@@ -723,11 +913,9 @@ class MainActivity : AppCompatActivity() {
             val anchor = prismAnchor ?: return
             val anchorPose = anchor.pose
 
-            // Screen Center Guide Reticle
             canvas.drawCircle(screenW / 2f, screenH / 2f, 75f, centerGuidePaint)
             canvas.drawCircle(screenW / 2f, screenH / 2f, 8f, centerGuidePaint)
 
-            // Geometry Parameters
             val hW = prismWidth / 2f
             val hD = prismDepth / 2f
             val r = min(hW, hD) * 0.36f
@@ -744,51 +932,46 @@ class MainActivity : AppCompatActivity() {
             val activeRed = Color.parseColor("#F85149")
             val capturedGreen = Color.parseColor("#3FB950")
 
-            // --- 1. RENDER LOWER TIER (y = 0 to h_mid: Upright) ---
+            // Lower Tier
             for (sector in 0 until 4) {
-                // A. Upright Flat Wall (ACTIVE: Facets 0, 2, 4, 6)
                 val facetIdx = sector * 2
                 val isCaptured = capturedThumbnails.containsKey(facetIdx)
                 val isActiveStep = currentStepIdx == facetIdx
                 val wallColor = when {
                     isCaptured -> capturedGreen
                     isActiveStep && isAligned -> capturedGreen
-                    else -> activeRed // Uncaptured active upright walls glow red
+                    else -> activeRed
                 }
                 drawFilletedWallSector(canvas, sector, baseLoop, midLoop, 0f, hMid, anchorPose, screenW, screenH, wallColor, true)
-
-                // B. Upright Filleted Corner Arc (INACTIVE: Structural fillet -> Visible Grey)
                 drawFilletedCornerSector(canvas, sector, baseLoop, midLoop, 0f, hMid, anchorPose, screenW, screenH, greyColor, false)
             }
 
-            // --- 2. RENDER UPPER TIER (y = h_mid to prismHeight: 30° Inward Slant) ---
+            // Upper Tier
             for (sector in 0 until 4) {
-                // A. Slanted Cardinal Wall (INACTIVE: Completes watertight loft -> Visible Grey)
                 drawFilletedWallSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, greyColor, false)
 
-                // B. Slanted Corner Chamfer Arc (ACTIVE: Facets 1, 3, 5, 7)
                 val facetIdx = sector * 2 + 1
                 val isCaptured = capturedThumbnails.containsKey(facetIdx)
                 val isActiveStep = currentStepIdx == facetIdx
                 val chamferColor = when {
                     isCaptured -> capturedGreen
                     isActiveStep && isAligned -> capturedGreen
-                    else -> activeRed // Uncaptured active corner chamfers glow red
+                    else -> activeRed
                 }
                 drawFilletedCornerSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, chamferColor, true)
             }
 
-            // --- 3. RENDER CLOSED CEILING CAP (ACTIVE: Facet 8 / 90° Overhead) ---
+            // Top Cap
             val isTopCaptured = capturedThumbnails.containsKey(8)
             val isTopActiveStep = currentStepIdx == 8
             val topColor = when {
                 isTopCaptured -> capturedGreen
                 isTopActiveStep && isAligned -> capturedGreen
-                else -> activeRed // Active ceiling cap: glows red until captured
+                else -> activeRed
             }
             drawTopCap(canvas, topLoop, prismHeight, anchorPose, screenW, screenH, topColor, true)
 
-            // --- 4. RENDER 3D PLANAR RETICLE ON ACTIVE TARGET ---
+            // Reticle
             if (currentStepIdx < sequence.size) {
                 val desc = getFacetDescriptor(currentStepIdx)
                 val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
@@ -849,14 +1032,12 @@ class MainActivity : AppCompatActivity() {
             val p3 = projectPoint(localToWorld(top[i0][0], y1, top[i0][2], anchorPose), w, h)
 
             if (p0 != null && p1 != null && p2 != null && p3 != null) {
-                // Perforated metal sheet fill
                 perforatedMeshPaint.shader = getMeshShaderForColor(color)
                 val path = Path().apply {
                     moveTo(p0.x, p0.y); lineTo(p1.x, p1.y); lineTo(p2.x, p2.y); lineTo(p3.x, p3.y); close()
                 }
                 canvas.drawPath(path, perforatedMeshPaint)
 
-                // Crisp boundary contour
                 wirePaint.color = color
                 wirePaint.strokeWidth = if (isActive) 3.5f else 2.2f
                 canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
@@ -879,7 +1060,6 @@ class MainActivity : AppCompatActivity() {
             wirePaint.color = color
             wirePaint.strokeWidth = if (isActive) 3.0f else 2.0f
 
-            // Construct smooth filleted mesh quads with perforated hole fill
             for (step in 0 until 5) {
                 val iA = (startIdx + step) % base.size
                 val iB = (startIdx + step + 1) % base.size
@@ -895,7 +1075,6 @@ class MainActivity : AppCompatActivity() {
                     }
                     canvas.drawPath(path, perforatedMeshPaint)
 
-                    // Draw only bottom, top, and corner boundary arcs to prevent barcode lines
                     canvas.drawLine(p0.x, p0.y, p1.x, p1.y, wirePaint)
                     canvas.drawLine(p2.x, p2.y, p3.x, p3.y, wirePaint)
                     if (step == 0) canvas.drawLine(p0.x, p0.y, p3.x, p3.y, wirePaint)
