@@ -31,6 +31,8 @@ jobs:
           key: android-debug-keystore-v1
 
       - name: Build Debug APK
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
         run: gradle assembleDebug --stacktrace
 
       - name: Upload APK Artifact
