@@ -67,7 +67,7 @@ class MainActivity : AppCompatActivity() {
 
     private val httpClient = OkHttpClient()
     private val modalEndpoint = "https://emmanuelnwalema--mobile-6dof-capture-ui.modal.run/upload_plate"
-    
+
     // QwenCloud / DeepSeek V4.1 Flash Configuration
     private val vlmBaseUrl = "https://maas.qwencloudapi.com/compatible-mode/v1/chat/completions"
     private val vlmModelName = "deepseek-v4.1-flash"
@@ -385,9 +385,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun triggerVlmOrientationAnalysis() {
-        val apiKey = BuildConfig.DASHSCOPE_API_KEY
+        val apiKey = Secrets.DASHSCOPE_API_KEY
         if (apiKey.isEmpty()) {
-            Log.d("VLM", "DASHSCOPE_API_KEY not configured in build. Skipping AI alignment.")
+            Log.d("VLM", "DASHSCOPE_API_KEY is empty. Skipping AI alignment.")
             return
         }
 
