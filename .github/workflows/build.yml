@@ -24,15 +24,17 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Restore Android Keystore Cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.android
-          key: android-debug-keystore-v1
+      - name: Inject API Key into Secrets.kt
+        run: |
+          cat << 'EOF' > app/src/main/java/com/example/assetcapturerig/Secrets.kt
+          package com.example.assetcapturerig
+
+          object Secrets {
+              var DASHSCOPE_API_KEY: String = "${{ secrets.DASHSCOPE_API_KEY }}"
+          }
+          EOF
 
       - name: Build Debug APK
-        env:
-          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
         run: gradle assembleDebug --stacktrace
 
       - name: Upload APK Artifact
