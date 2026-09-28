@@ -301,6 +301,7 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
+            // 1. Physical 3D Point-Cloud Dimensioning
             autoFitToObjectPointCloud(frame, anchor)
 
             sceneView.planeRenderer.isEnabled = false
@@ -316,6 +317,7 @@ class MainActivity : AppCompatActivity() {
             updateScaleLabels()
             overlayView.postInvalidate()
 
+            // 2. AI Canonical Yaw Orientation Query
             triggerVlmOrientationAnalysis()
         } else {
             Toast.makeText(this, "Pan phone to scan table surface first", Toast.LENGTH_SHORT).show()
@@ -378,6 +380,22 @@ class MainActivity : AppCompatActivity() {
                 prismWidth = maxDim.coerceIn(0.08f, 0.45f)
                 prismDepth = maxDim.coerceIn(0.08f, 0.45f)
                 prismHeight = spanY.coerceIn(0.05f, 0.35f)
+
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Auto-fit: $clusterCount points detected (${(prismWidth * 100).roundToInt()}×${(prismDepth * 100).roundToInt()}cm)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } else {
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Point cloud sparse ($clusterCount points) — default scale kept",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         } catch (e: Exception) {
             Log.e("AutoFit", "Point cloud auto-dimensioning skipped: ${e.message}")
@@ -387,12 +405,11 @@ class MainActivity : AppCompatActivity() {
     private fun triggerVlmOrientationAnalysis() {
         val apiKey = Secrets.DASHSCOPE_API_KEY
         if (apiKey.isEmpty()) {
-            Log.d("VLM", "DASHSCOPE_API_KEY is empty. Skipping AI alignment.")
+            Toast.makeText(this, "⚠️ AI Skipped: DASHSCOPE_API_KEY is empty in Secrets", Toast.LENGTH_LONG).show()
             return
         }
 
-        distIndicator.text = "AI ALIGNING ASSET ORIENTATION..."
-        distIndicator.setTextColor(Color.parseColor("#58A6FF"))
+        Toast.makeText(this, "🤖 DeepSeek V4.1 analyzing orientation...", Toast.LENGTH_SHORT).show()
 
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
         PixelCopy.request(
@@ -415,9 +432,15 @@ class MainActivity : AppCompatActivity() {
 
                             queryQwenCloudPoseAnalysis(b64, apiKey)
                         } catch (e: Exception) {
-                            Log.e("VLM", "Error preparing image for VLM: ${e.message}")
+                            runOnUiThread {
+                                Toast.makeText(this@MainActivity, "PixelCopy error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }.start()
+                } else {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "PixelCopy capture failed ($copyResult)", Toast.LENGTH_SHORT).show()
+                    }
                 }
             },
             Handler(Looper.getMainLooper())
@@ -463,12 +486,23 @@ class MainActivity : AppCompatActivity() {
 
         httpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                Log.e("VLM", "DeepSeek V4.1 Flash API request failed: ${e.message}")
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "AI Network Failure: ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
 
             override fun onResponse(call: Call, response: Response) {
+                val resCode = response.code
                 val resStr = response.body?.string() ?: ""
                 response.close()
+
+                if (resCode != 200) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "AI API Error ($resCode): $resStr", Toast.LENGTH_LONG).show()
+                    }
+                    return
+                }
+
                 try {
                     val root = JSONObject(resStr)
                     val rawContent = root.getJSONArray("choices")
@@ -502,12 +536,14 @@ class MainActivity : AppCompatActivity() {
 
                         Toast.makeText(
                             this@MainActivity,
-                            "AI Aligned to $objectName: ${if (yawOffset >= 0) "+" else ""}${String.format(Locale.US, "%.1f", yawOffset)}°",
+                            "✓ AI Aligned to $objectName: ${if (yawOffset >= 0) "+" else ""}${String.format(Locale.US, "%.1f", yawOffset)}°",
                             Toast.LENGTH_LONG
                         ).show()
                     }
                 } catch (e: Exception) {
-                    Log.e("VLM", "Error parsing VLM response: ${e.message}")
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "JSON Parsing Error: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         })
