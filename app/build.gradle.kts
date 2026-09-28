@@ -1,6 +1,6 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("kotlin-android")
 }
 
 android {
@@ -8,7 +8,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.assetcapturerig.v2"
+        applicationId = "com.example.assetcapturerig"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -16,9 +16,8 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Inject DASHSCOPE_API_KEY from the GitHub Actions environment into BuildConfig
-        val dashscopeKey = System.getenv("DASHSCOPE_API_KEY") ?: ""
-        buildConfigField("String", "DASHSCOPE_API_KEY", "\"$dashscopeKey\"")
+        val apiKey = System.getenv("DASHSCOPE_API_KEY") ?: ""
+        buildConfigField("String", "DASHSCOPE_API_KEY", "\"$apiKey\"")
     }
 
     buildFeatures {
@@ -32,9 +31,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-        }
-        debug {
-            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
