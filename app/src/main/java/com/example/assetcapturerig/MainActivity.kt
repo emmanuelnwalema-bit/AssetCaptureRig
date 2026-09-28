@@ -11,7 +11,6 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.view.PixelCopy
-import android.view.SurfaceView
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
@@ -19,8 +18,7 @@ import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.TrackingState
-import io.github.sceneview.ar.ArSceneView
-import io.github.sceneview.ar.arcore.ArFrame
+import io.github.sceneview.ar.ARSceneView
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -36,7 +34,7 @@ import kotlin.math.*
 class MainActivity : AppCompatActivity() {
 
     private lateinit var rootLayout: FrameLayout
-    private lateinit var sceneView: ArSceneView
+    private lateinit var sceneView: ARSceneView
     private lateinit var overlayView: PrismOverlayView
     private lateinit var snapFlash: View
 
@@ -158,16 +156,13 @@ class MainActivity : AppCompatActivity() {
 
         buildThumbnailStrip()
 
-        sceneView.onSessionCreated = { session ->
-            val config = Config(session)
-            config.setFocusMode(Config.FocusMode.AUTO)
-            config.setPlaneFindingMode(Config.PlaneFindingMode.HORIZONTAL)
-            config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE)
-            session.configure(config)
+        sceneView.sessionConfiguration = { _, config ->
+            config.focusMode = Config.FocusMode.AUTO
+            config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
+            config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
         }
 
-        sceneView.onArFrame = { arFrame ->
-            val frame = arFrame.frame
+        sceneView.onSessionUpdated = { _, frame ->
             lastFrame = frame
             onTrackingFrame(frame)
         }
@@ -306,6 +301,7 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
+            // 1. Initial point cloud auto-fit
             autoFitToObjectPointCloud(frame, anchor)
 
             sceneView.planeRenderer.isEnabled = false
@@ -321,6 +317,7 @@ class MainActivity : AppCompatActivity() {
             updateScaleLabels()
             overlayView.postInvalidate()
 
+            // 2. Query DeepSeek V4.1 Flash for canonical heading alignment
             triggerVlmOrientationAnalysis()
         } else {
             Toast.makeText(this, "Pan phone to scan table surface first", Toast.LENGTH_SHORT).show()
@@ -401,9 +398,9 @@ class MainActivity : AppCompatActivity() {
 
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
         PixelCopy.request(
-            sceneView as SurfaceView,
+            sceneView,
             bitmap,
-            PixelCopy.OnPixelCopyFinishedListener { copyResult ->
+            { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
                     Thread {
                         try {
@@ -650,9 +647,9 @@ class MainActivity : AppCompatActivity() {
 
         val bitmap = Bitmap.createBitmap(sceneView.width, sceneView.height, Bitmap.Config.ARGB_8888)
         PixelCopy.request(
-            sceneView as SurfaceView,
+            sceneView,
             bitmap,
-            PixelCopy.OnPixelCopyFinishedListener { copyResult ->
+            { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
                     Thread {
                         try {
@@ -792,7 +789,7 @@ class MainActivity : AppCompatActivity() {
             4 -> FacetDesc(0f, hMid * 0.5f, -hD, 0f, 0f, -1f, false)
             5 -> FacetDesc(-hW * 0.76f, hChamferY, -hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
             6 -> FacetDesc(-hW, hMid * 0.5f, 0f, -1f, 0f, 0f, false)
-            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, cos30 * sqrt2Inv, true)
+            7 -> FacetDesc(-hW * 0.76f, hChamferY, hD * 0.76f, -cos30 * sqrt2Inv, sin30, -cos30 * sqrt2Inv, true)
             8 -> FacetDesc(0f, prismHeight, 0f, 0f, 1f, 0f, false)
             else -> FacetDesc(0f, 0f, 0f, 0f, -1f, 0f, false)
         }
