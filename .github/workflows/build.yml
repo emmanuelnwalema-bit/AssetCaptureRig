@@ -25,14 +25,11 @@ jobs:
           gradle-version: '8.7'
 
       - name: Inject API Key into Secrets.kt
+        env:
+          KEY: ${{ secrets.DASHSCOPE_API_KEY }}
         run: |
-          cat << 'EOF' > app/src/main/java/com/example/assetcapturerig/Secrets.kt
-          package com.example.assetcapturerig
-
-          object Secrets {
-              var DASHSCOPE_API_KEY: String = "${{ secrets.DASHSCOPE_API_KEY }}"
-          }
-          EOF
+          mkdir -p app/src/main/java/com/example/assetcapturerig
+          printf 'package com.example.assetcapturerig\n\nobject Secrets {\n    const val DASHSCOPE_API_KEY: String = "%s"\n}\n' "$KEY" > app/src/main/java/com/example/assetcapturerig/Secrets.kt
 
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
