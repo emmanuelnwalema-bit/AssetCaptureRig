@@ -294,11 +294,22 @@ class MainActivity : AppCompatActivity() {
 
             isBoxPlaced = true
 
-            // Height fitting via point cloud
+            // 1. Height dimensioning from 3D point cloud
             autoFitToObjectPointCloud(frame, anchor)
 
-            // Pattern-immune radial boundary raycasting
-            performRobustRadialAlignment(frame, anchor)
+            // 2. Snapshot camera matrices synchronously while the frame is alive
+            val vMat = FloatArray(16)
+            val pMat = FloatArray(16)
+            val vpMat = FloatArray(16)
+            val invVpMat = FloatArray(16)
+
+            frame.camera.getViewMatrix(vMat, 0)
+            frame.camera.getProjectionMatrix(pMat, 0, 0.05f, 50.0f)
+            Matrix.multiplyMM(vpMat, 0, pMat, 0, vMat, 0)
+            Matrix.invertM(invVpMat, 0, vpMat, 0)
+
+            // 3. Robust Unprojected Radial Auto-Fit & Orientation
+            performAnalyticRadialAlignment(invVpMat, anchor)
 
             sceneView.planeRenderer.isEnabled = false
             sceneView.planeRenderer.isVisible = false
@@ -322,13 +333,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Pattern-Immune Center-Outward Radial Boundary Raycasting:
-     * 1. Samples the color directly at the reticle center (the asset).
-     * 2. Casts 24 radial rays outward until a sharp gradient transition occurs.
-     * 3. Raycasts the detected boundary points onto the ARCore table plane.
-     * 4. Calculates physical metric extents (width, depth) and major-axis orientation.
+     * Analytic Ray-Plane Projection:
+     * Unprojects 2D boundary pixels into 3D world rays and intersects them with the horizontal
+     * table plane without calling ARCore APIs in the background thread.
      */
-    private fun performRobustRadialAlignment(frame: Frame, anchor: Anchor) {
+    private fun performAnalyticRadialAlignment(invVpMatrix: FloatArray, anchor: Anchor) {
         val sWidth = sceneView.width
         val sHeight = sceneView.height
         if (sWidth <= 0 || sHeight <= 0) return
@@ -340,7 +349,7 @@ class MainActivity : AppCompatActivity() {
             { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
                     Thread {
-                        analyzeBoundaryAndFitPlane(bitmap, frame, anchor)
+                        analyzeBoundaryWithRayPlaneIntersection(bitmap, invVpMatrix, anchor)
                     }.start()
                 }
             },
@@ -348,138 +357,210 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun analyzeBoundaryAndFitPlane(fullBmp: Bitmap, frame: Frame, anchor: Anchor) {
+    private fun analyzeBoundaryWithRayPlaneIntersection(fullBmp: Bitmap, invVpMatrix: FloatArray, anchor: Anchor) {
         try {
             val cx = fullBmp.width / 2
             val cy = fullBmp.height / 2
+            val sW = fullBmp.width.toFloat()
+            val sH = fullBmp.height.toFloat()
 
-            // Sample asset center color
-            var sumR = 0; var sumG = 0; var sumB = 0; var cSamples = 0
-            for (dy in -6..6 step 3) {
-                for (dx in -6..6 step 3) {
-                    val p = fullBmp.getPixel(cx + dx, cy + dy)
-                    sumR += Color.red(p); sumG += Color.green(p); sumB += Color.blue(p)
-                    cSamples++
-                }
-            }
-            val assetR = sumR / cSamples
-            val assetG = sumG / cSamples
-            val assetB = sumB / cSamples
-
-            val maxRadius = (min(fullBmp.width, fullBmp.height) * 0.28f).toInt()
-            val rayCount = 24
-            val edgeHitsWorld = mutableListOf<FloatArray>()
-            val invAnchor = anchor.pose.inverse()
+            val maxRadius = (min(sW, sH) * 0.28f).toInt()
+            val rayCount = 32
+            val projectedPlanePoints = mutableListOf<FloatArray>()
+            val anchorPose = anchor.pose
+            val invAnchor = anchorPose.inverse()
+            val planeY = anchorPose.ty()
 
             for (i in 0 until rayCount) {
                 val angle = (2.0 * Math.PI * i / rayCount)
                 val cosA = cos(angle)
                 val sinA = sin(angle)
 
-                var foundEdge = false
-                var edgeX = (cx + maxRadius * cosA).toFloat()
-                var edgeY = (cy + maxRadius * sinA).toFloat()
+                var maxGrad = 0f
+                var bestR = (maxRadius * 0.65f).toInt()
 
-                // March along ray from center outward
-                for (r in 14..maxRadius step 4) {
+                // Radial march detecting maximum gradient step along the ray
+                for (r in 14 until maxRadius step 3) {
                     val px = (cx + r * cosA).toInt()
                     val py = (cy + r * sinA).toInt()
+                    val pxPrev = (cx + (r - 6) * cosA).toInt()
+                    val pyPrev = (cy + (r - 6) * sinA).toInt()
+
                     if (px !in 0 until fullBmp.width || py !in 0 until fullBmp.height) break
+                    if (pxPrev !in 0 until fullBmp.width || pyPrev !in 0 until fullBmp.height) continue
 
-                    val p = fullBmp.getPixel(px, py)
-                    val dR = Color.red(p) - assetR
-                    val dG = Color.green(p) - assetG
-                    val dB = Color.blue(p) - assetB
-                    val diff = sqrt((dR * dR + dG * dG + dB * dB).toDouble())
+                    val cNow = fullBmp.getPixel(px, py)
+                    val cPrev = fullBmp.getPixel(pxPrev, pyPrev)
 
-                    // Color divergence threshold indicating asset edge
-                    if (diff > 42.0) {
-                        edgeX = px.toFloat()
-                        edgeY = py.toFloat()
-                        foundEdge = true
-                        break
+                    val dR = (Color.red(cNow) - Color.red(cPrev)).toFloat()
+                    val dG = (Color.green(cNow) - Color.green(cPrev)).toFloat()
+                    val dB = (Color.blue(cNow) - Color.blue(cPrev)).toFloat()
+                    val grad = sqrt(dR * dR + dG * dG + dB * dB)
+
+                    if (grad > maxGrad && grad > 28.0f) {
+                        maxGrad = grad
+                        bestR = r
                     }
                 }
 
-                if (foundEdge) {
-                    val hits = frame.hitTest(edgeX, edgeY)
-                    val tableHit = hits.firstOrNull()
-                    if (tableHit != null) {
-                        val ptLocal = invAnchor.transformPoint(
-                            floatArrayOf(tableHit.hitPose.tx(), tableHit.hitPose.ty(), tableHit.hitPose.tz())
-                        )
-                        edgeHitsWorld.add(ptLocal)
+                val edgeScreenX = (cx + bestR * cosA).toFloat()
+                val edgeScreenY = (cy + bestR * sinA).toFloat()
+
+                // Intersect camera ray with the horizontal plane Y = planeY
+                val worldHit = intersectScreenRayWithHorizontalPlane(edgeScreenX, edgeScreenY, sW, sH, invVpMatrix, planeY)
+                if (worldHit != null) {
+                    val localHit = invAnchor.transformPoint(worldHit)
+                    // Keep hits located within a reasonable radius of the anchor
+                    val hDist = sqrt(localHit[0] * localHit[0] + localHit[2] * localHit[2])
+                    if (hDist in 0.02f..0.35f) {
+                        projectedPlanePoints.add(localHit)
                     }
                 }
             }
 
-            if (edgeHitsWorld.size >= 8) {
-                var maxDistSq = 0f
-                var pA = edgeHitsWorld[0]
-                var pB = edgeHitsWorld[1]
+            if (projectedPlanePoints.size >= 12) {
+                // Compute centroid of the projected 2D ground footprint
+                var meanX = 0f
+                var meanZ = 0f
+                for (pt in projectedPlanePoints) {
+                    meanX += pt[0]
+                    meanZ += pt[2]
+                }
+                meanX /= projectedPlanePoints.size
+                meanZ /= projectedPlanePoints.size
 
-                // Find longest major physical axis on the table
-                for (i in 0 until edgeHitsWorld.size) {
-                    for (j in i + 1 until edgeHitsWorld.size) {
-                        val dx = edgeHitsWorld[i][0] - edgeHitsWorld[j][0]
-                        val dz = edgeHitsWorld[i][2] - edgeHitsWorld[j][2]
-                        val distSq = dx * dx + dz * dz
-                        if (distSq > maxDistSq) {
-                            maxDistSq = distSq
-                            pA = edgeHitsWorld[i]
-                            pB = edgeHitsWorld[j]
-                        }
-                    }
+                // 2D Covariance matrix on the table surface (PCA)
+                var covXX = 0f
+                var covZZ = 0f
+                var covXZ = 0f
+                for (pt in projectedPlanePoints) {
+                    val dx = pt[0] - meanX
+                    val dz = pt[2] - meanZ
+                    covXX += dx * dx
+                    covZZ += dz * dz
+                    covXZ += dx * dz
                 }
 
-                val majorLenMeters = sqrt(maxDistSq)
+                // Principal orientation angle of the object resting on the table
+                val principalAngle = 0.5f * atan2(2f * covXZ, covXX - covZZ)
+                val cosTheta = cos(principalAngle)
+                val sinTheta = sin(principalAngle)
 
-                // Calculate orientation of major axis
-                val axisX = pB[0] - pA[0]
-                val axisZ = pB[2] - pA[2]
-                val detectedAngle = atan2(axisX, axisZ)
-
-                // Measure orthogonal breadth (minor axis)
-                val normX = -axisZ / majorLenMeters
-                val normZ = axisX / majorLenMeters
-                var minBreadth = Float.MAX_VALUE
-                var maxBreadth = -Float.MAX_VALUE
-
-                for (pt in edgeHitsWorld) {
-                    val proj = pt[0] * normX + pt[2] * normZ
-                    minBreadth = min(minBreadth, proj)
-                    maxBreadth = max(maxBreadth, proj)
+                // Project footprint points onto major and minor axes
+                var minU = Float.MAX_VALUE; var maxU = -Float.MAX_VALUE
+                var minV = Float.MAX_VALUE; var maxV = -Float.MAX_VALUE
+                for (pt in projectedPlanePoints) {
+                    val dx = pt[0] - meanX
+                    val dz = pt[2] - meanZ
+                    val u = dx * cosTheta + dz * sinTheta
+                    val v = -dx * sinTheta + dz * cosTheta
+                    minU = min(minU, u)
+                    maxU = max(maxU, u)
+                    minV = min(minV, v)
+                    maxV = max(maxV, v)
                 }
 
-                val minorLenMeters = (maxBreadth - minBreadth)
+                val spanU = (maxU - minU) * 1.12f + 0.015f
+                val spanV = (maxV - minV) * 1.12f + 0.015f
 
-                val finalWidth = max(majorLenMeters, minorLenMeters) * 1.12f + 0.02f
-                val finalDepth = min(majorLenMeters, minorLenMeters) * 1.12f + 0.02f
+                val finalDepth: Float
+                val finalWidth: Float
+                val finalYawAngle: Float
+
+                // In our capture coordinate system, Depth is front-to-back (longest dimension)
+                if (spanU >= spanV) {
+                    finalDepth = spanU.coerceIn(0.08f, 0.45f)
+                    finalWidth = spanV.coerceIn(0.06f, 0.35f)
+                    finalYawAngle = principalAngle
+                } else {
+                    finalDepth = spanV.coerceIn(0.08f, 0.45f)
+                    finalWidth = spanU.coerceIn(0.06f, 0.35f)
+                    finalYawAngle = (principalAngle + (Math.PI / 2.0).toFloat())
+                }
 
                 runOnUiThread {
-                    initialAzimuth = detectedAngle
-                    prismWidth = finalWidth.coerceIn(0.08f, 0.45f)
-                    prismDepth = finalDepth.coerceIn(0.08f, 0.45f)
+                    initialAzimuth = finalYawAngle
+                    prismWidth = finalWidth
+                    prismDepth = finalDepth
 
                     updateScaleLabels()
                     overlayView.postInvalidate()
 
                     val wCm = (prismWidth * 100).roundToInt()
                     val dCm = (prismDepth * 100).roundToInt()
+                    val hCm = (prismHeight * 100).roundToInt()
+                    val yawDeg = Math.toDegrees(finalYawAngle.toDouble()).roundToInt()
                     Toast.makeText(
                         this@MainActivity,
-                        "✓ Auto-fitted to asset: ${wCm}×${dCm}cm",
-                        Toast.LENGTH_SHORT
+                        "✓ Auto-Fit: ${wCm}×${dCm}×${hCm}cm | Yaw: ${yawDeg}°",
+                        Toast.LENGTH_LONG
                     ).show()
                 }
             } else {
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Surface reflection low: manual scale active", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Edge contrast low — manual scaling active", Toast.LENGTH_SHORT).show()
                 }
             }
         } catch (e: Exception) {
-            Log.e("RadialFit", "Radial boundary fit skipped: ${e.message}")
+            Log.e("AnalyticFit", "Error in analytic alignment", e)
         }
+    }
+
+    /**
+     * Unprojects a 2D screen coordinate into a 3D ray and computes its intersection
+     * with the horizontal plane Y = planeY.
+     */
+    private fun intersectScreenRayWithHorizontalPlane(
+        screenX: Float, screenY: Float,
+        screenWidth: Float, screenHeight: Float,
+        invVpMatrix: FloatArray,
+        planeY: Float
+    ): FloatArray? {
+        val ndcX = (screenX / screenWidth) * 2f - 1f
+        val ndcY = 1f - (screenY / screenHeight) * 2f
+
+        val nearVec = floatArrayOf(ndcX, ndcY, -1f, 1f)
+        val farVec = floatArrayOf(ndcX, ndcY, 1f, 1f)
+
+        val nearWorld = FloatArray(4)
+        val farWorld = FloatArray(4)
+
+        Matrix.multiplyMV(nearWorld, 0, invVpMatrix, 0, nearVec, 0)
+        Matrix.multiplyMV(farWorld, 0, invVpMatrix, 0, farVec, 0)
+
+        val wNear = nearWorld[3]
+        val wFar = farWorld[3]
+        if (abs(wNear) < 1e-5f || abs(wFar) < 1e-5f) return null
+
+        val rayOriginX = nearWorld[0] / wNear
+        val rayOriginY = nearWorld[1] / wNear
+        val rayOriginZ = nearWorld[2] / wNear
+
+        val rayFarX = farWorld[0] / wFar
+        val rayFarY = farWorld[1] / wFar
+        val rayFarZ = farWorld[2] / wFar
+
+        val dirX = rayFarX - rayOriginX
+        val dirY = rayFarY - rayOriginY
+        val dirZ = rayFarZ - rayOriginZ
+        val len = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+        if (len < 1e-4f) return null
+
+        val dX = dirX / len
+        val dY = dirY / len
+        val dZ = dirZ / len
+
+        // Ray must point downward toward the table surface
+        if (abs(dY) < 1e-4f) return null
+
+        val t = (planeY - rayOriginY) / dY
+        if (t <= 0.05f) return null
+
+        return floatArrayOf(
+            rayOriginX + t * dX,
+            planeY,
+            rayOriginZ + t * dZ
+        )
     }
 
     private fun autoFitToObjectPointCloud(frame: Frame, anchor: Anchor) {
