@@ -16,7 +16,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Restrict native binaries to real phone architectures to prevent packaging OOM errors
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
@@ -48,6 +47,10 @@ android {
         viewBinding = true
     }
 
+    androidResources {
+        noCompress += listOf("tflite")
+    }
+
     packaging {
         resources {
             excludes += listOf(
@@ -62,7 +65,6 @@ android {
             )
         }
         jniLibs {
-            // Keep native libraries uncompressed in the APK for fast loading and reduced memory footprint during packaging
             useLegacyPackaging = true
         }
     }
@@ -77,6 +79,10 @@ dependencies {
     // ARCore & Filament/Sceneview
     implementation("com.google.ar:core:1.41.0")
     implementation("io.github.sceneview:arsceneview:2.2.1")
+
+    // TensorFlow Lite Runtime (~1.5 MB runtime footprint)
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     // OkHttp for Modal uploads
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
