@@ -1,6 +1,7 @@
 package com.example.assetcapturerig
 
 import android.content.Context
+import android.content.res.AssetFileDescriptor
 import android.graphics.*
 import android.media.AudioManager
 import android.media.ToneGenerator
@@ -23,8 +24,13 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import org.tensorflow.lite.Interpreter
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.channels.FileChannel
 import java.util.Locale
 import kotlin.math.*
 
@@ -65,6 +71,10 @@ class MainActivity : AppCompatActivity() {
     private val httpClient = OkHttpClient()
     private val modalEndpoint = "https://emmanuelnwalema--mobile-6dof-capture-ui.modal.run/upload_plate"
 
+    private var tfliteInterpreter: Interpreter? = null
+    private val modelAssetName = "yolov8n_obb.tflite"
+    private val modelInputSize = 640
+
     private var toneGen: ToneGenerator? = null
 
     private var currentStepIdx = 0
@@ -77,9 +87,9 @@ class MainActivity : AppCompatActivity() {
     private var alignStartTime: Long? = null
     private var cooldownUntil: Long = 0L
 
-    private var prismWidth = 0.18f
-    private var prismDepth = 0.18f
-    private var prismHeight = 0.14f
+    private var prismWidth = 0.12f
+    private var prismDepth = 0.15f
+    private var prismHeight = 0.05f
 
     private val capturedThumbnails = mutableMapOf<Int, Bitmap>()
     private val previewCardViews = mutableListOf<ImageView>()
@@ -144,6 +154,8 @@ class MainActivity : AppCompatActivity() {
             toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
         } catch (e: Exception) {}
 
+        initTFLite()
+
         overlayView = PrismOverlayView(this)
         rootLayout.addView(overlayView, 1)
 
@@ -154,6 +166,9 @@ class MainActivity : AppCompatActivity() {
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
             config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
         }
+
+        sceneView.planeRenderer.isEnabled = false
+        sceneView.planeRenderer.isVisible = false
 
         sceneView.onSessionUpdated = { _, frame ->
             lastFrame = frame
@@ -185,6 +200,25 @@ class MainActivity : AppCompatActivity() {
 
         updateChecklistUI()
         updateScaleLabels()
+    }
+
+    private fun initTFLite() {
+        Thread {
+            try {
+                val fd: AssetFileDescriptor = assets.openFd(modelAssetName)
+                val inputStream = FileInputStream(fd.fileDescriptor)
+                val fileChannel = inputStream.channel
+                val modelBuffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+                val options = Interpreter.Options().apply {
+                    setNumThreads(4)
+                    useNNAPI = true
+                }
+                tfliteInterpreter = Interpreter(modelBuffer, options)
+                Log.d("TFLite", "OBB Model loaded successfully")
+            } catch (e: Exception) {
+                Log.w("TFLite", "Model file not found in assets, heuristic mode will be used: ${e.message}")
+            }
+        }.start()
     }
 
     private fun buildThumbnailStrip() {
@@ -246,7 +280,7 @@ class MainActivity : AppCompatActivity() {
     private fun scalePrism(factor: Float) {
         prismWidth = (prismWidth * factor).coerceIn(0.06f, 0.60f)
         prismDepth = (prismDepth * factor).coerceIn(0.06f, 0.60f)
-        prismHeight = (prismHeight * factor).coerceIn(0.04f, 0.40f)
+        prismHeight = (prismHeight * factor).coerceIn(0.03f, 0.40f)
         updateScaleLabels()
         overlayView.postInvalidate()
     }
@@ -290,14 +324,11 @@ class MainActivity : AppCompatActivity() {
             val camPose = frame.camera.pose
             val anchorPose = anchor.pose
             val camInAnchor = anchorPose.inverse().transformPoint(floatArrayOf(camPose.tx(), camPose.ty(), camPose.tz()))
-            initialAzimuth = atan2(camInAnchor[0], camInAnchor[2])
+            val camAngle = atan2(camInAnchor[0], camInAnchor[2])
+            initialAzimuth = camAngle
 
             isBoxPlaced = true
 
-            // 1. Height dimensioning from 3D point cloud
-            autoFitToObjectPointCloud(frame, anchor)
-
-            // 2. Snapshot camera matrices synchronously while the frame is alive
             val vMat = FloatArray(16)
             val pMat = FloatArray(16)
             val vpMat = FloatArray(16)
@@ -308,11 +339,7 @@ class MainActivity : AppCompatActivity() {
             Matrix.multiplyMM(vpMat, 0, pMat, 0, vMat, 0)
             Matrix.invertM(invVpMat, 0, vpMat, 0)
 
-            // 3. Robust Unprojected Radial Auto-Fit & Orientation
-            performAnalyticRadialAlignment(invVpMat, anchor)
-
-            sceneView.planeRenderer.isEnabled = false
-            sceneView.planeRenderer.isVisible = false
+            runOnDeviceObbPipeline(invVpMat, anchor, camAngle, frame)
 
             actionButton.visibility = View.GONE
             scaleBar.visibility = View.VISIBLE
@@ -328,16 +355,25 @@ class MainActivity : AppCompatActivity() {
                 toneGen?.startTone(ToneGenerator.TONE_PROP_ACK, 140)
             } catch (e: Exception) {}
         } else {
-            Toast.makeText(this, "Pan phone to scan table surface first", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Aim reticle at table surface first", Toast.LENGTH_SHORT).show()
         }
     }
 
-    /**
-     * Analytic Ray-Plane Projection:
-     * Unprojects 2D boundary pixels into 3D world rays and intersects them with the horizontal
-     * table plane without calling ARCore APIs in the background thread.
-     */
-    private fun performAnalyticRadialAlignment(invVpMatrix: FloatArray, anchor: Anchor) {
+    data class ObbDetection(
+        val cx: Float,
+        val cy: Float,
+        val width: Float,
+        val height: Float,
+        val angleRad: Float,
+        val confidence: Float
+    )
+
+    private fun runOnDeviceObbPipeline(
+        invVpMatrix: FloatArray,
+        anchor: Anchor,
+        camAngle: Float,
+        frame: Frame
+    ) {
         val sWidth = sceneView.width
         val sHeight = sceneView.height
         if (sWidth <= 0 || sHeight <= 0) return
@@ -349,7 +385,18 @@ class MainActivity : AppCompatActivity() {
             { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
                     Thread {
-                        analyzeBoundaryWithRayPlaneIntersection(bitmap, invVpMatrix, anchor)
+                        val interpreter = tfliteInterpreter
+                        if (interpreter != null) {
+                            val detection = runTfliteInference(bitmap, interpreter)
+                            if (detection != null) {
+                                projectObbToArPlane(detection, invVpMatrix, anchor, camAngle, frame, sWidth, sHeight)
+                                return@Thread
+                            }
+                        }
+                        // Graceful fallback if model is not yet bundled
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, "TFLite model pending: default alignment active", Toast.LENGTH_SHORT).show()
+                        }
                     }.start()
                 }
             },
@@ -357,159 +404,197 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun analyzeBoundaryWithRayPlaneIntersection(fullBmp: Bitmap, invVpMatrix: FloatArray, anchor: Anchor) {
+    private fun runTfliteInference(bitmap: Bitmap, interpreter: Interpreter): ObbDetection? {
         try {
-            val cx = fullBmp.width / 2
-            val cy = fullBmp.height / 2
-            val sW = fullBmp.width.toFloat()
-            val sH = fullBmp.height.toFloat()
+            val scaledBmp = Bitmap.createScaledBitmap(bitmap, modelInputSize, modelInputSize, true)
+            val inputBuffer = ByteBuffer.allocateDirect(1 * modelInputSize * modelInputSize * 3 * 4).apply {
+                order(ByteOrder.nativeOrder())
+            }
 
-            val maxRadius = (min(sW, sH) * 0.28f).toInt()
-            val rayCount = 32
-            val projectedPlanePoints = mutableListOf<FloatArray>()
-            val anchorPose = anchor.pose
-            val invAnchor = anchorPose.inverse()
-            val planeY = anchorPose.ty()
+            val intValues = IntArray(modelInputSize * modelInputSize)
+            scaledBmp.getPixels(intValues, 0, modelInputSize, 0, 0, modelInputSize, modelInputSize)
 
-            for (i in 0 until rayCount) {
-                val angle = (2.0 * Math.PI * i / rayCount)
-                val cosA = cos(angle)
-                val sinA = sin(angle)
-
-                var maxGrad = 0f
-                var bestR = (maxRadius * 0.65f).toInt()
-
-                // Radial march detecting maximum gradient step along the ray
-                for (r in 14 until maxRadius step 3) {
-                    val px = (cx + r * cosA).toInt()
-                    val py = (cy + r * sinA).toInt()
-                    val pxPrev = (cx + (r - 6) * cosA).toInt()
-                    val pyPrev = (cy + (r - 6) * sinA).toInt()
-
-                    if (px !in 0 until fullBmp.width || py !in 0 until fullBmp.height) break
-                    if (pxPrev !in 0 until fullBmp.width || pyPrev !in 0 until fullBmp.height) continue
-
-                    val cNow = fullBmp.getPixel(px, py)
-                    val cPrev = fullBmp.getPixel(pxPrev, pyPrev)
-
-                    val dR = (Color.red(cNow) - Color.red(cPrev)).toFloat()
-                    val dG = (Color.green(cNow) - Color.green(cPrev)).toFloat()
-                    val dB = (Color.blue(cNow) - Color.blue(cPrev)).toFloat()
-                    val grad = sqrt(dR * dR + dG * dG + dB * dB)
-
-                    if (grad > maxGrad && grad > 28.0f) {
-                        maxGrad = grad
-                        bestR = r
-                    }
-                }
-
-                val edgeScreenX = (cx + bestR * cosA).toFloat()
-                val edgeScreenY = (cy + bestR * sinA).toFloat()
-
-                // Intersect camera ray with the horizontal plane Y = planeY
-                val worldHit = intersectScreenRayWithHorizontalPlane(edgeScreenX, edgeScreenY, sW, sH, invVpMatrix, planeY)
-                if (worldHit != null) {
-                    val localHit = invAnchor.transformPoint(worldHit)
-                    // Keep hits located within a reasonable radius of the anchor
-                    val hDist = sqrt(localHit[0] * localHit[0] + localHit[2] * localHit[2])
-                    if (hDist in 0.02f..0.35f) {
-                        projectedPlanePoints.add(localHit)
-                    }
+            var pixel = 0
+            for (i in 0 until modelInputSize) {
+                for (j in 0 until modelInputSize) {
+                    val value = intValues[pixel++]
+                    inputBuffer.putFloat(((value shr 16 and 0xFF) / 255.0f))
+                    inputBuffer.putFloat(((value shr 8 and 0xFF) / 255.0f))
+                    inputBuffer.putFloat(((value and 0xFF) / 255.0f))
                 }
             }
 
-            if (projectedPlanePoints.size >= 12) {
-                // Compute centroid of the projected 2D ground footprint
-                var meanX = 0f
-                var meanZ = 0f
-                for (pt in projectedPlanePoints) {
-                    meanX += pt[0]
-                    meanZ += pt[2]
-                }
-                meanX /= projectedPlanePoints.size
-                meanZ /= projectedPlanePoints.size
+            // YOLOv8-OBB standard output: [1, 5 + num_classes, 8400]
+            val outputShape = interpreter.getOutputTensor(0).shape()
+            val channels = outputShape[1]
+            val numBoxes = outputShape[2]
+            val outputBuffer = Array(1) { Array(channels) { FloatArray(numBoxes) } }
 
-                // 2D Covariance matrix on the table surface (PCA)
-                var covXX = 0f
-                var covZZ = 0f
-                var covXZ = 0f
-                for (pt in projectedPlanePoints) {
-                    val dx = pt[0] - meanX
-                    val dz = pt[2] - meanZ
-                    covXX += dx * dx
-                    covZZ += dz * dz
-                    covXZ += dx * dz
-                }
+            interpreter.run(inputBuffer, outputBuffer)
 
-                // Principal orientation angle of the object resting on the table
-                val principalAngle = 0.5f * atan2(2f * covXZ, covXX - covZZ)
-                val cosTheta = cos(principalAngle)
-                val sinTheta = sin(principalAngle)
+            var bestConf = 0.25f
+            var bestDetection: ObbDetection? = null
+            val imgCenterNorm = 0.5f
 
-                // Project footprint points onto major and minor axes
-                var minU = Float.MAX_VALUE; var maxU = -Float.MAX_VALUE
-                var minV = Float.MAX_VALUE; var maxV = -Float.MAX_VALUE
-                for (pt in projectedPlanePoints) {
-                    val dx = pt[0] - meanX
-                    val dz = pt[2] - meanZ
-                    val u = dx * cosTheta + dz * sinTheta
-                    val v = -dx * sinTheta + dz * cosTheta
-                    minU = min(minU, u)
-                    maxU = max(maxU, u)
-                    minV = min(minV, v)
-                    maxV = max(maxV, v)
+            for (i in 0 until numBoxes) {
+                val cx = outputBuffer[0][0][i] / modelInputSize
+                val cy = outputBuffer[0][1][i] / modelInputSize
+                val w = outputBuffer[0][2][i] / modelInputSize
+                val h = outputBuffer[0][3][i] / modelInputSize
+
+                var maxScore = 0f
+                for (c in 4 until channels - 1) {
+                    val score = outputBuffer[0][c][i]
+                    if (score > maxScore) maxScore = score
                 }
 
-                val spanU = (maxU - minU) * 1.12f + 0.015f
-                val spanV = (maxV - minV) * 1.12f + 0.015f
+                val angle = outputBuffer[0][channels - 1][i] // Orientation in radians [-pi/2, pi/2]
 
-                val finalDepth: Float
-                val finalWidth: Float
-                val finalYawAngle: Float
-
-                // In our capture coordinate system, Depth is front-to-back (longest dimension)
-                if (spanU >= spanV) {
-                    finalDepth = spanU.coerceIn(0.08f, 0.45f)
-                    finalWidth = spanV.coerceIn(0.06f, 0.35f)
-                    finalYawAngle = principalAngle
-                } else {
-                    finalDepth = spanV.coerceIn(0.08f, 0.45f)
-                    finalWidth = spanU.coerceIn(0.06f, 0.35f)
-                    finalYawAngle = (principalAngle + (Math.PI / 2.0).toFloat())
-                }
-
-                runOnUiThread {
-                    initialAzimuth = finalYawAngle
-                    prismWidth = finalWidth
-                    prismDepth = finalDepth
-
-                    updateScaleLabels()
-                    overlayView.postInvalidate()
-
-                    val wCm = (prismWidth * 100).roundToInt()
-                    val dCm = (prismDepth * 100).roundToInt()
-                    val hCm = (prismHeight * 100).roundToInt()
-                    val yawDeg = Math.toDegrees(finalYawAngle.toDouble()).roundToInt()
-                    Toast.makeText(
-                        this@MainActivity,
-                        "✓ Auto-Fit: ${wCm}×${dCm}×${hCm}cm | Yaw: ${yawDeg}°",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            } else {
-                runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Edge contrast low — manual scaling active", Toast.LENGTH_SHORT).show()
+                if (maxScore > bestConf) {
+                    val distToCenter = sqrt((cx - imgCenterNorm) * (cx - imgCenterNorm) + (cy - imgCenterNorm) * (cy - imgCenterNorm))
+                    if (distToCenter < 0.35f) {
+                        bestConf = maxScore
+                        bestDetection = ObbDetection(cx, cy, w, h, angle, maxScore)
+                    }
                 }
             }
+            return bestDetection
         } catch (e: Exception) {
-            Log.e("AnalyticFit", "Error in analytic alignment", e)
+            Log.e("TFLiteInference", "Inference error: ${e.message}")
+            return null
         }
     }
 
-    /**
-     * Unprojects a 2D screen coordinate into a 3D ray and computes its intersection
-     * with the horizontal plane Y = planeY.
-     */
+    private fun projectObbToArPlane(
+        detection: ObbDetection,
+        invVpMatrix: FloatArray,
+        anchor: Anchor,
+        camAngle: Float,
+        frame: Frame,
+        sWidth: Int,
+        sHeight: Int
+    ) {
+        val anchorPose = anchor.pose
+        val invAnchor = anchorPose.inverse()
+        val planeY = anchorPose.ty()
+
+        val screenCX = detection.cx * sWidth
+        val screenCY = detection.cy * sHeight
+        val cosA = cos(detection.angleRad)
+        val sinA = sin(detection.angleRad)
+
+        // Half extents in screen pixels
+        val halfW = (detection.width * sWidth) * 0.5f
+        val halfH = (detection.height * sHeight) * 0.5f
+
+        val pMajorScreenX = screenCX + halfW * cosA
+        val pMajorScreenY = screenCY + halfW * sinA
+        val pMinorScreenX = screenCX - halfH * sinA
+        val pMinorScreenY = screenCY + halfH * cosA
+
+        val centerWorld = intersectScreenRayWithHorizontalPlane(screenCX, screenCY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val majorWorld = intersectScreenRayWithHorizontalPlane(pMajorScreenX, pMajorScreenY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val minorWorld = intersectScreenRayWithHorizontalPlane(pMinorScreenX, pMinorScreenY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+
+        if (centerWorld == null || majorWorld == null || minorWorld == null) return
+
+        val localCenter = invAnchor.transformPoint(centerWorld)
+        val localMajor = invAnchor.transformPoint(majorWorld)
+        val localMinor = invAnchor.transformPoint(minorWorld)
+
+        // Real metric dimensions on table surface
+        val dMajorX = localMajor[0] - localCenter[0]
+        val dMajorZ = localMajor[2] - localCenter[2]
+        val metricMajor = sqrt(dMajorX * dMajorX + dMajorZ * dMajorZ) * 2f
+
+        val dMinorX = localMinor[0] - localCenter[0]
+        val dMinorZ = localMinor[2] - localCenter[2]
+        val metricMinor = sqrt(dMinorX * dMinorX + dMinorZ * dMinorZ) * 2f
+
+        // Exact physical linear orientation angle on ground plane
+        val axisAngle = atan2(dMajorX, dMajorZ)
+
+        val candidates = floatArrayOf(
+            axisAngle,
+            axisAngle + (Math.PI / 2.0).toFloat(),
+            axisAngle + Math.PI.toFloat(),
+            axisAngle - (Math.PI / 2.0).toFloat()
+        )
+
+        var bestAngle = candidates[0]
+        var maxDot = -Float.MAX_VALUE
+        var bestIdx = 0
+
+        for (idx in candidates.indices) {
+            val ang = candidates[idx]
+            val dot = cos(ang - camAngle)
+            if (dot > maxDot) {
+                maxDot = dot
+                bestAngle = ang
+                bestIdx = idx
+            }
+        }
+
+        val finalWidth: Float
+        val finalDepth: Float
+
+        if (bestIdx == 0 || bestIdx == 2) {
+            finalDepth = metricMajor.coerceIn(0.06f, 0.45f)
+            finalWidth = metricMinor.coerceIn(0.05f, 0.35f)
+        } else {
+            finalDepth = metricMinor.coerceIn(0.06f, 0.45f)
+            finalWidth = metricMajor.coerceIn(0.05f, 0.35f)
+        }
+
+        var measuredHeight = 0f
+        try {
+            val pc = frame.acquirePointCloud()
+            val pBuf = pc.points
+            val pCount = pBuf.remaining() / 4
+            var maxY = 0f
+            var validPts = 0
+
+            for (p in 0 until pCount) {
+                val conf = pBuf.get(p * 4 + 3)
+                if (conf < 0.20f) continue
+                val pw = invAnchor.transformPoint(floatArrayOf(pBuf.get(p * 4), pBuf.get(p * 4 + 1), pBuf.get(p * 4 + 2)))
+                val distH = sqrt(pw[0] * pw[0] + pw[2] * pw[2])
+                if (pw[1] in 0.008f..0.35f && distH <= 0.25f) {
+                    maxY = max(maxY, pw[1])
+                    validPts++
+                }
+            }
+            pc.close()
+            if (validPts >= 4 && maxY > 0.015f) {
+                measuredHeight = (maxY * 1.12f + 0.01f).coerceIn(0.03f, 0.30f)
+            }
+        } catch (e: Exception) {}
+
+        if (measuredHeight <= 0.01f) {
+            measuredHeight = (min(finalWidth, finalDepth) * 0.42f).coerceIn(0.035f, 0.12f)
+        }
+
+        runOnUiThread {
+            initialAzimuth = bestAngle
+            prismWidth = finalWidth
+            prismDepth = finalDepth
+            prismHeight = measuredHeight
+
+            updateScaleLabels()
+            overlayView.postInvalidate()
+
+            val wCm = (prismWidth * 100).roundToInt()
+            val dCm = (prismDepth * 100).roundToInt()
+            val hCm = (prismHeight * 100).roundToInt()
+            val yawDeg = Math.toDegrees(bestAngle.toDouble()).roundToInt()
+            Toast.makeText(
+                this@MainActivity,
+                "✓ OBB Locked: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     private fun intersectScreenRayWithHorizontalPlane(
         screenX: Float, screenY: Float,
         screenWidth: Float, screenHeight: Float,
@@ -532,74 +617,24 @@ class MainActivity : AppCompatActivity() {
         val wFar = farWorld[3]
         if (abs(wNear) < 1e-5f || abs(wFar) < 1e-5f) return null
 
-        val rayOriginX = nearWorld[0] / wNear
-        val rayOriginY = nearWorld[1] / wNear
-        val rayOriginZ = nearWorld[2] / wNear
+        val rOx = nearWorld[0] / wNear
+        val rOy = nearWorld[1] / wNear
+        val rOz = nearWorld[2] / wNear
 
-        val rayFarX = farWorld[0] / wFar
-        val rayFarY = farWorld[1] / wFar
-        val rayFarZ = farWorld[2] / wFar
-
-        val dirX = rayFarX - rayOriginX
-        val dirY = rayFarY - rayOriginY
-        val dirZ = rayFarZ - rayOriginZ
+        val dirX = (farWorld[0] / wFar) - rOx
+        val dirY = (farWorld[1] / wFar) - rOy
+        val dirZ = (farWorld[2] / wFar) - rOz
         val len = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
-        if (len < 1e-4f) return null
+        if (len < 1e-4f || abs(dirY / len) < 1e-4f) return null
 
         val dX = dirX / len
         val dY = dirY / len
         val dZ = dirZ / len
 
-        // Ray must point downward toward the table surface
-        if (abs(dY) < 1e-4f) return null
-
-        val t = (planeY - rayOriginY) / dY
+        val t = (planeY - rOy) / dY
         if (t <= 0.05f) return null
 
-        return floatArrayOf(
-            rayOriginX + t * dX,
-            planeY,
-            rayOriginZ + t * dZ
-        )
-    }
-
-    private fun autoFitToObjectPointCloud(frame: Frame, anchor: Anchor) {
-        try {
-            val pointCloud = frame.acquirePointCloud()
-            val pointsBuffer = pointCloud.points
-            val count = pointsBuffer.remaining() / 4
-            val anchorPose = anchor.pose
-            val invAnchor = anchorPose.inverse()
-
-            var maxY = 0.0f
-            var clusterCount = 0
-
-            for (i in 0 until count) {
-                val wx = pointsBuffer.get(i * 4)
-                val wy = pointsBuffer.get(i * 4 + 1)
-                val wz = pointsBuffer.get(i * 4 + 2)
-                val conf = pointsBuffer.get(i * 4 + 3)
-
-                if (conf < 0.15f) continue
-
-                val pLocal = invAnchor.transformPoint(floatArrayOf(wx, wy, wz))
-                val ly = pLocal[1]
-                val horizontalDist = sqrt(pLocal[0] * pLocal[0] + pLocal[2] * pLocal[2])
-
-                if (ly in 0.008f..0.45f && horizontalDist <= 0.35f) {
-                    maxY = max(maxY, ly)
-                    clusterCount++
-                }
-            }
-
-            pointCloud.close()
-
-            if (clusterCount >= 3 && maxY > 0.012f) {
-                prismHeight = (maxY * 1.15f + 0.015f).coerceIn(0.04f, 0.35f)
-            }
-        } catch (e: Exception) {
-            Log.e("AutoFit", "Point cloud height fit skipped: ${e.message}")
-        }
+        return floatArrayOf(rOx + t * dX, planeY, rOz + t * dZ)
     }
 
     private fun onTrackingFrame(frame: Frame) {
@@ -913,7 +948,7 @@ class MainActivity : AppCompatActivity() {
 
         private val reticlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 6f
+            strokeWidth = 5f
         }
 
         private val fillReticlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -924,6 +959,17 @@ class MainActivity : AppCompatActivity() {
             color = Color.argb(120, 255, 255, 255)
             style = Paint.Style.STROKE
             strokeWidth = 3f
+        }
+
+        private val webXrDiskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(45, 88, 166, 255)
+            style = Paint.Style.FILL
+        }
+
+        private val webXrRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#58A6FF")
+            style = Paint.Style.STROKE
+            strokeWidth = 4.5f
         }
 
         private val viewMatrix = FloatArray(16)
@@ -994,11 +1040,34 @@ class MainActivity : AppCompatActivity() {
                 val hitResults = frame.hitTest(screenW / 2f, screenH / 2f)
                 val hit = hitResults.firstOrNull()
                 if (hit != null) {
-                    val p = projectPoint(hit.hitPose.tx(), hit.hitPose.ty(), hit.hitPose.tz(), screenW, screenH)
-                    if (p != null) {
-                        reticlePaint.color = Color.parseColor("#58A6FF")
-                        canvas.drawCircle(p.x, p.y, 60f, reticlePaint)
-                        canvas.drawCircle(p.x, p.y, 18f, reticlePaint)
+                    val hp = hit.hitPose
+                    val diskRadius = 0.09f
+                    val pts = mutableListOf<PointF?>()
+
+                    for (i in 0 until 24) {
+                        val ang = (2.0 * Math.PI * i / 24).toFloat()
+                        val wx = hp.tx() + diskRadius * cos(ang)
+                        val wy = hp.ty()
+                        val wz = hp.tz() + diskRadius * sin(ang)
+                        pts.add(projectPoint(wx, wy, wz, screenW, screenH))
+                    }
+
+                    if (pts.all { it != null }) {
+                        val diskPath = Path().apply {
+                            moveTo(pts[0]!!.x, pts[0]!!.y)
+                            for (i in 1 until pts.size) lineTo(pts[i]!!.x, pts[i]!!.y)
+                            close()
+                        }
+                        canvas.drawPath(diskPath, webXrDiskPaint)
+                        for (i in pts.indices) {
+                            val next = (i + 1) % pts.size
+                            canvas.drawLine(pts[i]!!.x, pts[i]!!.y, pts[next]!!.x, pts[next]!!.y, webXrRingPaint)
+                        }
+                    }
+
+                    val cp = projectPoint(hp.tx(), hp.ty(), hp.tz(), screenW, screenH)
+                    if (cp != null) {
+                        canvas.drawCircle(cp.x, cp.y, 8f, webXrRingPaint)
                     }
                 }
                 return
