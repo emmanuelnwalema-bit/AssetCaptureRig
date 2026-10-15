@@ -14,6 +14,7 @@ import android.util.Log
 import android.view.PixelCopy
 import android.view.View
 import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
@@ -74,6 +75,8 @@ class MainActivity : AppCompatActivity() {
     private var tfliteInterpreter: Interpreter? = null
     private val modelAssetName = "yolov8n_obb.tflite"
     private val modelInputSize = 640
+
+    private val debugLog = StringBuilder("App Initialized\n")
 
     private var toneGen: ToneGenerator? = null
 
@@ -198,25 +201,63 @@ class MainActivity : AppCompatActivity() {
         btnScaleUp.setOnClickListener { scalePrism(1.08f) }
         btnScaleDown.setOnClickListener { scalePrism(0.92f) }
 
+        // Tap HUD scale readout or target badge at any point to view real-time diagnostics
+        scaleReadout.setOnClickListener { showDebugDialog() }
+        valScale.setOnClickListener { showDebugDialog() }
+        targetBadge.setOnClickListener { showDebugDialog() }
+
         updateChecklistUI()
         updateScaleLabels()
+    }
+
+    private fun logDebug(msg: String) {
+        Log.d("RigDebug", msg)
+        debugLog.append("[${System.currentTimeMillis() % 100000}] $msg\n")
+    }
+
+    private fun showDebugDialog() {
+        runOnUiThread {
+            val tv = TextView(this).apply {
+                text = debugLog.toString()
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#0D1117"))
+                setPadding(32, 32, 32, 32)
+                setTextIsSelectable(true)
+            }
+            val sv = ScrollView(this).apply { addView(tv) }
+            AlertDialog.Builder(this)
+                .setTitle("Rig TFLite Diagnostics")
+                .setView(sv)
+                .setPositiveButton("OK", null)
+                .setNeutralButton("Clear") { _, _ -> debugLog.clear() }
+                .show()
+        }
     }
 
     private fun initTFLite() {
         Thread {
             try {
+                logDebug("Loading asset: $modelAssetName")
+                val rootAssets = assets.list("") ?: emptyArray()
+                logDebug("Assets found: ${rootAssets.joinToString()}")
+
                 val fd: AssetFileDescriptor = assets.openFd(modelAssetName)
                 val inputStream = FileInputStream(fd.fileDescriptor)
                 val fileChannel = inputStream.channel
                 val modelBuffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+
                 val options = Interpreter.Options().apply {
                     setNumThreads(4)
-                    useNNAPI = true
                 }
-                tfliteInterpreter = Interpreter(modelBuffer, options)
-                Log.d("TFLite", "OBB Model loaded successfully")
+                val interp = Interpreter(modelBuffer, options)
+                tfliteInterpreter = interp
+
+                val inShape = interp.getInputTensor(0).shape()
+                val outShape = interp.getOutputTensor(0).shape()
+                logDebug("✓ Model Ready!\nIn: ${inShape.contentToString()}\nOut: ${outShape.contentToString()}")
             } catch (e: Exception) {
-                Log.w("TFLite", "Model file not found in assets, heuristic mode will be used: ${e.message}")
+                logDebug("❌ Model Load Failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }.start()
     }
@@ -392,10 +433,9 @@ class MainActivity : AppCompatActivity() {
                                 projectObbToArPlane(detection, invVpMatrix, anchor, camAngle, frame, sWidth, sHeight)
                                 return@Thread
                             }
-                        }
-                        // Graceful fallback if model is not yet bundled
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, "TFLite model pending: default alignment active", Toast.LENGTH_SHORT).show()
+                        } else {
+                            logDebug("⚠️ Interpreter is null: model file not loaded")
+                            showDebugDialog()
                         }
                     }.start()
                 }
@@ -406,6 +446,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun runTfliteInference(bitmap: Bitmap, interpreter: Interpreter): ObbDetection? {
         try {
+            logDebug("Running inference on ${bitmap.width}x${bitmap.height} frame...")
             val scaledBmp = Bitmap.createScaledBitmap(bitmap, modelInputSize, modelInputSize, true)
             val inputBuffer = ByteBuffer.allocateDirect(1 * modelInputSize * modelInputSize * 3 * 4).apply {
                 order(ByteOrder.nativeOrder())
@@ -424,43 +465,80 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // YOLOv8-OBB standard output: [1, 5 + num_classes, 8400]
             val outputShape = interpreter.getOutputTensor(0).shape()
-            val channels = outputShape[1]
-            val numBoxes = outputShape[2]
-            val outputBuffer = Array(1) { Array(channels) { FloatArray(numBoxes) } }
+            logDebug("Tensor output shape: ${outputShape.contentToString()}")
+
+            val dim1 = outputShape[1]
+            val dim2 = outputShape[2]
+            val isChannelsFirst = dim1 < dim2
+            val channels = if (isChannelsFirst) dim1 else dim2
+            val numBoxes = if (isChannelsFirst) dim2 else dim1
+
+            logDebug("Channels: $channels, Boxes: $numBoxes, ChannelsFirst: $isChannelsFirst")
+
+            val outputBuffer = if (isChannelsFirst) {
+                Array(1) { Array(channels) { FloatArray(numBoxes) } }
+            } else {
+                Array(1) { Array(numBoxes) { FloatArray(channels) } }
+            }
 
             interpreter.run(inputBuffer, outputBuffer)
 
-            var bestConf = 0.25f
+            var maxConfFound = 0f
             var bestDetection: ObbDetection? = null
-            val imgCenterNorm = 0.5f
 
             for (i in 0 until numBoxes) {
-                val cx = outputBuffer[0][0][i] / modelInputSize
-                val cy = outputBuffer[0][1][i] / modelInputSize
-                val w = outputBuffer[0][2][i] / modelInputSize
-                val h = outputBuffer[0][3][i] / modelInputSize
+                val cx: Float; val cy: Float; val w: Float; val h: Float; val angle: Float
+                var maxClassScore = 0f
 
-                var maxScore = 0f
-                for (c in 4 until channels - 1) {
-                    val score = outputBuffer[0][c][i]
-                    if (score > maxScore) maxScore = score
+                if (isChannelsFirst) {
+                    @Suppress("UNCHECKED_CAST")
+                    val buf = outputBuffer as Array<Array<FloatArray>>
+                    cx = buf[0][0][i] / modelInputSize
+                    cy = buf[0][1][i] / modelInputSize
+                    w = buf[0][2][i] / modelInputSize
+                    h = buf[0][3][i] / modelInputSize
+                    for (c in 4 until channels - 1) {
+                        val score = buf[0][c][i]
+                        if (score > maxClassScore) maxClassScore = score
+                    }
+                    angle = buf[0][channels - 1][i]
+                } else {
+                    @Suppress("UNCHECKED_CAST")
+                    val buf = outputBuffer as Array<Array<FloatArray>>
+                    cx = buf[0][i][0] / modelInputSize
+                    cy = buf[0][i][1] / modelInputSize
+                    w = buf[0][i][2] / modelInputSize
+                    h = buf[0][i][3] / modelInputSize
+                    for (c in 4 until channels - 1) {
+                        val score = buf[0][i][c]
+                        if (score > maxClassScore) maxClassScore = score
+                    }
+                    angle = buf[0][i][channels - 1]
                 }
 
-                val angle = outputBuffer[0][channels - 1][i] // Orientation in radians [-pi/2, pi/2]
+                if (maxClassScore > maxConfFound) maxConfFound = maxClassScore
 
-                if (maxScore > bestConf) {
-                    val distToCenter = sqrt((cx - imgCenterNorm) * (cx - imgCenterNorm) + (cy - imgCenterNorm) * (cy - imgCenterNorm))
-                    if (distToCenter < 0.35f) {
-                        bestConf = maxScore
-                        bestDetection = ObbDetection(cx, cy, w, h, angle, maxScore)
+                if (maxClassScore > 0.20f) {
+                    val distToCenter = sqrt((cx - 0.5f) * (cx - 0.5f) + (cy - 0.5f) * (cy - 0.5f))
+                    if (distToCenter < 0.38f) {
+                        bestDetection = ObbDetection(cx, cy, w, h, angle, maxClassScore)
                     }
                 }
             }
+
+            logDebug("Inference complete. Max confidence: ${String.format(Locale.US, "%.3f", maxConfFound)}")
+            if (bestDetection == null) {
+                logDebug("⚠️ No detection passed threshold (>0.20)")
+                showDebugDialog()
+            } else {
+                logDebug("✓ Detection accepted: conf=${String.format(Locale.US, "%.2f", bestDetection.confidence)}, angle=${bestDetection.angleRad}")
+            }
+
             return bestDetection
         } catch (e: Exception) {
-            Log.e("TFLiteInference", "Inference error: ${e.message}")
+            logDebug("❌ Inference Exception: ${e.javaClass.simpleName}: ${e.message}\n${e.stackTraceToString().take(250)}")
+            showDebugDialog()
             return null
         }
     }
@@ -483,7 +561,6 @@ class MainActivity : AppCompatActivity() {
         val cosA = cos(detection.angleRad)
         val sinA = sin(detection.angleRad)
 
-        // Half extents in screen pixels
         val halfW = (detection.width * sWidth) * 0.5f
         val halfH = (detection.height * sHeight) * 0.5f
 
@@ -496,13 +573,15 @@ class MainActivity : AppCompatActivity() {
         val majorWorld = intersectScreenRayWithHorizontalPlane(pMajorScreenX, pMajorScreenY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
         val minorWorld = intersectScreenRayWithHorizontalPlane(pMinorScreenX, pMinorScreenY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
 
-        if (centerWorld == null || majorWorld == null || minorWorld == null) return
+        if (centerWorld == null || majorWorld == null || minorWorld == null) {
+            logDebug("Ray projection returned null (rays outside plane)")
+            return
+        }
 
         val localCenter = invAnchor.transformPoint(centerWorld)
         val localMajor = invAnchor.transformPoint(majorWorld)
         val localMinor = invAnchor.transformPoint(minorWorld)
 
-        // Real metric dimensions on table surface
         val dMajorX = localMajor[0] - localCenter[0]
         val dMajorZ = localMajor[2] - localCenter[2]
         val metricMajor = sqrt(dMajorX * dMajorX + dMajorZ * dMajorZ) * 2f
@@ -511,7 +590,6 @@ class MainActivity : AppCompatActivity() {
         val dMinorZ = localMinor[2] - localCenter[2]
         val metricMinor = sqrt(dMinorX * dMinorX + dMinorZ * dMinorZ) * 2f
 
-        // Exact physical linear orientation angle on ground plane
         val axisAngle = atan2(dMajorX, dMajorZ)
 
         val candidates = floatArrayOf(
@@ -587,6 +665,7 @@ class MainActivity : AppCompatActivity() {
             val dCm = (prismDepth * 100).roundToInt()
             val hCm = (prismHeight * 100).roundToInt()
             val yawDeg = Math.toDegrees(bestAngle.toDouble()).roundToInt()
+            logDebug("✓ Locked Box: ${wCm}x${dCm}x${hCm}cm | Heading: ${yawDeg}°")
             Toast.makeText(
                 this@MainActivity,
                 "✓ OBB Locked: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
