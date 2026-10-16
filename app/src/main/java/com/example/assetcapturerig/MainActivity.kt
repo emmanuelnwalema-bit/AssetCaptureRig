@@ -90,8 +90,8 @@ class MainActivity : AppCompatActivity() {
     private var cooldownUntil: Long = 0L
 
     private var prismWidth = 0.12f
-    private var prismDepth = 0.15f
-    private var prismHeight = 0.05f
+    private var prismDepth = 0.12f
+    private var prismHeight = 0.08f
 
     private val capturedThumbnails = mutableMapOf<Int, Bitmap>()
     private val previewCardViews = mutableListOf<ImageView>()
@@ -200,9 +200,22 @@ class MainActivity : AppCompatActivity() {
         btnScaleUp.setOnClickListener { scalePrism(1.08f) }
         btnScaleDown.setOnClickListener { scalePrism(0.92f) }
 
+        // Tap HUD scale readout or target badge to view real-time diagnostics
         scaleReadout.setOnClickListener { showDebugDialog() }
         valScale.setOnClickListener { showDebugDialog() }
         targetBadge.setOnClickListener { showDebugDialog() }
+
+        // Long press scale readout to instantly rotate box 90° for ambiguous square/circular items
+        scaleReadout.setOnLongClickListener {
+            val temp = prismWidth
+            prismWidth = prismDepth
+            prismDepth = temp
+            initialAzimuth += (Math.PI / 2.0).toFloat()
+            updateScaleLabels()
+            overlayView.postInvalidate()
+            Toast.makeText(this, "Rotated 90°", Toast.LENGTH_SHORT).show()
+            true
+        }
 
         updateChecklistUI()
         updateScaleLabels()
@@ -311,9 +324,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun scalePrism(factor: Float) {
-        prismWidth = (prismWidth * factor).coerceIn(0.06f, 0.60f)
-        prismDepth = (prismDepth * factor).coerceIn(0.06f, 0.60f)
-        prismHeight = (prismHeight * factor).coerceIn(0.03f, 0.40f)
+        prismWidth = (prismWidth * factor).coerceIn(0.04f, 0.50f)
+        prismDepth = (prismDepth * factor).coerceIn(0.04f, 0.50f)
+        prismHeight = (prismHeight * factor).coerceIn(0.02f, 0.40f)
         updateScaleLabels()
         overlayView.postInvalidate()
     }
@@ -511,10 +524,10 @@ class MainActivity : AppCompatActivity() {
 
                 if (maxClass > highestScore) highestScore = maxClass
 
-                // Confidence threshold for target object
-                if (maxClass > 0.35f) {
+                // Generalized confidence threshold across all e-commerce categories
+                if (maxClass > 0.28f) {
                     val distToCenter = sqrt((cx - 0.5f) * (cx - 0.5f) + (cy - 0.5f) * (cy - 0.5f))
-                    if (distToCenter < 0.38f) {
+                    if (distToCenter < 0.40f) {
                         val l = (cx - w / 2f).coerceIn(0f, 1f)
                         val t = (cy - h / 2f).coerceIn(0f, 1f)
                         val r = (cx + w / 2f).coerceIn(0f, 1f)
@@ -524,12 +537,12 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            logDebug("COCO Inference complete. Highest Score: ${String.format(Locale.US, "%.3f", highestScore)}")
+            logDebug("COCO Max Score: ${String.format(Locale.US, "%.3f", highestScore)}")
             if (bestBox == null) {
-                logDebug("⚠️ No object detected above 0.35 threshold")
+                logDebug("⚠️ No object detected above 0.28 threshold")
                 showDebugDialog()
             } else {
-                logDebug("✓ Detected COCO class $bestBox.classId with confidence ${String.format(Locale.US, "%.2f", bestBox.confidence)}")
+                logDebug("✓ Detected COCO class ${bestBox.classId} with conf ${String.format(Locale.US, "%.2f", bestBox.confidence)}")
             }
             return bestBox
         } catch (e: Exception) {
@@ -539,6 +552,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Universal 3D Table-Plane Fitting & Alignment.
+     * Works agnostically across any asset shape (long, wide, square, circular, diagonal).
+     */
     private fun projectCocoBoxAndOrient(
         fullBmp: Bitmap,
         box: DetectionBox,
@@ -555,22 +572,25 @@ class MainActivity : AppCompatActivity() {
 
         val leftPx = (box.left * sWidth).toInt().coerceIn(0, sWidth - 1)
         val topPx = (box.top * sHeight).toInt().coerceIn(0, sHeight - 1)
-        val rightPx = (box.right * sWidth).toInt().coerceIn(leftPx + 4, sWidth)
-        val botPx = (box.bottom * sHeight).toInt().coerceIn(topPx + 4, sHeight)
+        val rightPx = (box.right * sWidth).toInt().coerceIn(leftPx + 8, sWidth)
+        val botPx = (box.bottom * sHeight).toInt().coerceIn(topPx + 8, sHeight)
         val cropW = rightPx - leftPx
         val cropH = botPx - topPx
 
-        // 1. Calculate isolated object orientation strictly INSIDE the detected box (ignores background couch stripes)
+        // 1. Isolate the object contour strictly INSIDE the detected YOLO box (cuts out background patterns)
         val cropBmp = Bitmap.createBitmap(fullBmp, leftPx, topPx, cropW, cropH)
+
+        val cTL = cropBmp.getPixel(2, 2)
+        val cTR = cropBmp.getPixel(cropW - 3, 2)
+        val cBL = cropBmp.getPixel(2, cropH - 3)
+        val cBR = cropBmp.getPixel(cropW - 3, cropH - 3)
+        val bgR = (Color.red(cTL) + Color.red(cTR) + Color.red(cBL) + Color.red(cBR)) / 4
+        val bgG = (Color.green(cTL) + Color.green(cTR) + Color.green(cBL) + Color.green(cBR)) / 4
+        val bgB = (Color.blue(cTL) + Color.blue(cTR) + Color.blue(cBL) + Color.blue(cBR)) / 4
+
         var sumX = 0.0; var sumY = 0.0; var count = 0
         val fgX = mutableListOf<Int>()
         val fgY = mutableListOf<Int>()
-
-        // Estimate local asset vs background contrast inside the bounding box
-        val borderSample = cropBmp.getPixel(2, 2)
-        val bgR = Color.red(borderSample)
-        val bgG = Color.green(borderSample)
-        val bgB = Color.blue(borderSample)
 
         for (y in 2 until cropH - 2 step 3) {
             for (x in 2 until cropW - 2 step 3) {
@@ -588,83 +608,131 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        var localTheta = 0f
-        if (count > 20) {
-            val cX = sumX / count
-            val cY = sumY / count
+        val barX = if (count > 20) (sumX / count).toFloat() else cropW / 2f
+        val barY = if (count > 20) (sumY / count).toFloat() else cropH / 2f
+
+        // Compute 2D principal axis of the isolated object silhouette
+        var theta2D = if (cropH > cropW) (Math.PI / 2.0).toFloat() else 0f
+        if (count > 30) {
             var mu20 = 0.0; var mu02 = 0.0; var mu11 = 0.0
             for (i in 0 until count) {
-                val dx = fgX[i] - cX
-                val dy = fgY[i] - cY
+                val dx = fgX[i] - barX
+                val dy = fgY[i] - barY
                 mu20 += dx * dx
                 mu02 += dy * dy
                 mu11 += dx * dy
             }
-            localTheta = (0.5 * atan2(2.0 * mu11, mu20 - mu02)).toFloat()
+            theta2D = (0.5 * atan2(2.0 * mu11, mu20 - mu02)).toFloat()
         }
 
-        // 2. Project 2D bounding extents to 3D ARCore tabletop plane
-        val midX = (leftPx + rightPx) / 2f
-        val midY = (topPx + botPx) / 2f
+        val cosT = cos(theta2D)
+        val sinT = sin(theta2D)
+        val uX = cosT; val uY = sinT
+        val vX = -sinT; val vY = cosT
 
-        val cosT = cos(localTheta)
-        val sinT = sin(localTheta)
-        val halfW = cropW * 0.5f
-        val halfH = cropH * 0.5f
+        var minU = Float.MAX_VALUE; var maxU = -Float.MAX_VALUE
+        var minV = Float.MAX_VALUE; var maxV = -Float.MAX_VALUE
 
-        val pA = intersectScreenRayWithHorizontalPlane(midX, midY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
-        val pMajor = intersectScreenRayWithHorizontalPlane(midX + halfW * cosT, midY + halfW * sinT, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
-        val pMinor = intersectScreenRayWithHorizontalPlane(midX - halfH * sinT, midY + halfH * cosT, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        if (count > 30) {
+            for (i in 0 until count) {
+                val dx = fgX[i] - barX
+                val dy = fgY[i] - barY
+                val pu = dx * uX + dy * uY
+                val pv = dx * vX + dy * vY
+                minU = min(minU, pu); maxU = max(maxU, pu)
+                minV = min(minV, pv); maxV = max(maxV, pv)
+            }
+        } else {
+            minU = -cropW * 0.45f; maxU = cropW * 0.45f
+            minV = -cropH * 0.45f; maxV = cropH * 0.45f
+        }
 
-        if (pA == null || pMajor == null || pMinor == null) {
+        val halfSpan1Px = (maxU - minU) * 0.5f
+        val halfSpan2Px = (maxV - minV) * 0.5f
+
+        val screenCX = leftPx + barX
+        val screenCY = topPx + barY
+
+        // 2. Unproject the two orthogonal axes down to the horizontal table plane
+        val pCenterWorld = intersectScreenRayWithHorizontalPlane(screenCX, screenCY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val p1AWorld = intersectScreenRayWithHorizontalPlane(screenCX + halfSpan1Px * uX, screenCY + halfSpan1Px * uY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val p1BWorld = intersectScreenRayWithHorizontalPlane(screenCX - halfSpan1Px * uX, screenCY - halfSpan1Px * uY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val p2AWorld = intersectScreenRayWithHorizontalPlane(screenCX + halfSpan2Px * vX, screenCY + halfSpan2Px * vY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val p2BWorld = intersectScreenRayWithHorizontalPlane(screenCX - halfSpan2Px * vX, screenCY - halfSpan2Px * vY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+
+        if (pCenterWorld == null || p1AWorld == null || p1BWorld == null || p2AWorld == null || p2BWorld == null) {
             logDebug("Plane ray projection outside valid bounds")
             return
         }
 
-        val lCenter = invAnchor.transformPoint(pA)
-        val lMajor = invAnchor.transformPoint(pMajor)
-        val lMinor = invAnchor.transformPoint(pMinor)
+        val l1A = invAnchor.transformPoint(p1AWorld)
+        val l1B = invAnchor.transformPoint(p1BWorld)
+        val l2A = invAnchor.transformPoint(p2AWorld)
+        val l2B = invAnchor.transformPoint(p2BWorld)
 
-        val dMajX = lMajor[0] - lCenter[0]
-        val dMajZ = lMajor[2] - lCenter[2]
-        val metricMajor = sqrt(dMajX * dMajX + dMajZ * dMajZ) * 2f
+        // 3. Compute true physical metric spans and unit vectors on the table surface
+        val v1X = l1A[0] - l1B[0]
+        val v1Z = l1A[2] - l1B[2]
+        val span1 = sqrt(v1X * v1X + v1Z * v1Z).coerceAtLeast(0.04f)
+        val u1X = v1X / span1
+        val u1Z = v1Z / span1
 
-        val dMinX = lMinor[0] - lCenter[0]
-        val dMinZ = lMinor[2] - lCenter[2]
-        val metricMinor = sqrt(dMinX * dMinX + dMinZ * dMinZ) * 2f
+        val v2X = l2A[0] - l2B[0]
+        val v2Z = l2A[2] - l2B[2]
+        val span2 = sqrt(v2X * v2X + v2Z * v2Z).coerceAtLeast(0.04f)
+        val u2X = v2X / span2
+        val u2Z = v2Z / span2
 
-        val axisAngle = atan2(dMajX, dMajZ)
-        val candidates = floatArrayOf(
-            axisAngle,
-            axisAngle + (Math.PI / 2.0).toFloat(),
-            axisAngle + Math.PI.toFloat(),
-            axisAngle - (Math.PI / 2.0).toFloat()
-        )
+        // 4. Universal Canonical Normal Selection:
+        // Evaluates all 4 physical edge normals of the asset footprint to determine which
+        // face directly addresses the user's camera viewpoint.
+        val camDirX = sin(camAngle)
+        val camDirZ = cos(camAngle)
 
-        var bestAngle = candidates[0]
-        var maxDot = -Float.MAX_VALUE
+        val dot0 = u1X * camDirX + u1Z * camDirZ
+        val dot1 = -dot0
+        val dot2 = u2X * camDirX + u2Z * camDirZ
+        val dot3 = -dot2
+
+        val dots = floatArrayOf(dot0, dot1, dot2, dot3)
         var bestIdx = 0
-        for (idx in candidates.indices) {
-            val ang = candidates[idx]
-            val dot = cos(ang - camAngle)
-            if (dot > maxDot) {
-                maxDot = dot
-                bestAngle = ang
-                bestIdx = idx
+        var maxDot = -Float.MAX_VALUE
+        for (i in 0 until 4) {
+            if (dots[i] > maxDot) {
+                maxDot = dots[i]
+                bestIdx = i
             }
         }
 
+        val margin = 1.10f
         val finalWidth: Float
         val finalDepth: Float
-        if (bestIdx == 0 || bestIdx == 2) {
-            finalDepth = metricMajor.coerceIn(0.06f, 0.45f)
-            finalWidth = metricMinor.coerceIn(0.05f, 0.35f)
-        } else {
-            finalDepth = metricMinor.coerceIn(0.06f, 0.45f)
-            finalWidth = metricMajor.coerceIn(0.05f, 0.35f)
+        val headingAngle: Float
+
+        when (bestIdx) {
+            0 -> {
+                finalDepth = (span1 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                finalWidth = (span2 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                headingAngle = atan2(u1X, u1Z)
+            }
+            1 -> {
+                finalDepth = (span1 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                finalWidth = (span2 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                headingAngle = atan2(-u1X, -u1Z)
+            }
+            2 -> {
+                finalDepth = (span2 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                finalWidth = (span1 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                headingAngle = atan2(u2X, u2Z)
+            }
+            else -> {
+                finalDepth = (span2 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                finalWidth = (span1 * margin + 0.012f).coerceIn(0.04f, 0.50f)
+                headingAngle = atan2(-u2X, -u2Z)
+            }
         }
 
-        // 3. Measure Height via Point Cloud
+        // 5. Vertical height dimensioning via elevated point cloud
         var measuredHeight = 0f
         try {
             val pc = frame.acquirePointCloud()
@@ -672,29 +740,30 @@ class MainActivity : AppCompatActivity() {
             val pCount = pBuf.remaining() / 4
             var maxY = 0f
             var validPts = 0
+            val maxBoundR = max(finalWidth, finalDepth) * 0.75f
 
             for (p in 0 until pCount) {
                 val conf = pBuf.get(p * 4 + 3)
                 if (conf < 0.20f) continue
                 val pw = invAnchor.transformPoint(floatArrayOf(pBuf.get(p * 4), pBuf.get(p * 4 + 1), pBuf.get(p * 4 + 2)))
                 val distH = sqrt(pw[0] * pw[0] + pw[2] * pw[2])
-                if (pw[1] in 0.008f..0.35f && distH <= 0.25f) {
+                if (pw[1] in 0.006f..0.45f && distH <= maxBoundR) {
                     maxY = max(maxY, pw[1])
                     validPts++
                 }
             }
             pc.close()
-            if (validPts >= 4 && maxY > 0.015f) {
-                measuredHeight = (maxY * 1.12f + 0.01f).coerceIn(0.03f, 0.30f)
+            if (validPts >= 3 && maxY > 0.010f) {
+                measuredHeight = (maxY * 1.15f + 0.01f).coerceIn(0.02f, 0.40f)
             }
         } catch (e: Exception) {}
 
         if (measuredHeight <= 0.01f) {
-            measuredHeight = (min(finalWidth, finalDepth) * 0.38f).coerceIn(0.03f, 0.12f)
+            measuredHeight = (min(finalWidth, finalDepth) * 0.42f).coerceIn(0.025f, 0.15f)
         }
 
         runOnUiThread {
-            initialAzimuth = bestAngle
+            initialAzimuth = headingAngle
             prismWidth = finalWidth
             prismDepth = finalDepth
             prismHeight = measuredHeight
@@ -705,11 +774,11 @@ class MainActivity : AppCompatActivity() {
             val wCm = (prismWidth * 100).roundToInt()
             val dCm = (prismDepth * 100).roundToInt()
             val hCm = (prismHeight * 100).roundToInt()
-            val yawDeg = Math.toDegrees(bestAngle.toDouble()).roundToInt()
-            logDebug("✓ Locked Box: ${wCm}x${dCm}x${hCm}cm | Heading: ${yawDeg}°")
+            val yawDeg = Math.toDegrees(headingAngle.toDouble()).roundToInt()
+            logDebug("✓ Universal Fit: ${wCm}x${dCm}x${hCm}cm | Heading: ${yawDeg}°")
             Toast.makeText(
                 this@MainActivity,
-                "✓ COCO Locked: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
+                "✓ Auto-Fit: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
                 Toast.LENGTH_SHORT
             ).show()
         }
