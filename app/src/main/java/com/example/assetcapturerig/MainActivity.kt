@@ -73,11 +73,10 @@ class MainActivity : AppCompatActivity() {
     private val modalEndpoint = "https://emmanuelnwalema--mobile-6dof-capture-ui.modal.run/upload_plate"
 
     private var tfliteInterpreter: Interpreter? = null
-    private val modelAssetName = "yolov8n_obb.tflite"
+    private val modelAssetName = "yolov8n.tflite"
     private val modelInputSize = 640
 
     private val debugLog = StringBuilder("App Initialized\n")
-
     private var toneGen: ToneGenerator? = null
 
     private var currentStepIdx = 0
@@ -201,7 +200,6 @@ class MainActivity : AppCompatActivity() {
         btnScaleUp.setOnClickListener { scalePrism(1.08f) }
         btnScaleDown.setOnClickListener { scalePrism(0.92f) }
 
-        // Tap HUD scale readout or target badge at any point to view real-time diagnostics
         scaleReadout.setOnClickListener { showDebugDialog() }
         valScale.setOnClickListener { showDebugDialog() }
         targetBadge.setOnClickListener { showDebugDialog() }
@@ -239,9 +237,6 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try {
                 logDebug("Loading asset: $modelAssetName")
-                val rootAssets = assets.list("") ?: emptyArray()
-                logDebug("Assets found: ${rootAssets.joinToString()}")
-
                 val fd: AssetFileDescriptor = assets.openFd(modelAssetName)
                 val inputStream = FileInputStream(fd.fileDescriptor)
                 val fileChannel = inputStream.channel
@@ -255,7 +250,7 @@ class MainActivity : AppCompatActivity() {
 
                 val inShape = interp.getInputTensor(0).shape()
                 val outShape = interp.getOutputTensor(0).shape()
-                logDebug("✓ Model Ready!\nIn: ${inShape.contentToString()}\nOut: ${outShape.contentToString()}")
+                logDebug("✓ COCO Model Ready!\nIn: ${inShape.contentToString()}\nOut: ${outShape.contentToString()}")
             } catch (e: Exception) {
                 logDebug("❌ Model Load Failed: ${e.javaClass.simpleName}: ${e.message}")
             }
@@ -296,10 +291,7 @@ class MainActivity : AppCompatActivity() {
 
             frame.addView(iv)
             frame.addView(badge)
-
-            frame.setOnClickListener {
-                showFullPreview(i)
-            }
+            frame.setOnClickListener { showFullPreview(i) }
 
             previewContainer.addView(frame)
             previewCardViews.add(iv)
@@ -380,7 +372,7 @@ class MainActivity : AppCompatActivity() {
             Matrix.multiplyMM(vpMat, 0, pMat, 0, vMat, 0)
             Matrix.invertM(invVpMat, 0, vpMat, 0)
 
-            runOnDeviceObbPipeline(invVpMat, anchor, camAngle, frame)
+            runOnDeviceCocoPipeline(invVpMat, anchor, camAngle, frame)
 
             actionButton.visibility = View.GONE
             scaleBar.visibility = View.VISIBLE
@@ -400,16 +392,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    data class ObbDetection(
-        val cx: Float,
-        val cy: Float,
-        val width: Float,
-        val height: Float,
-        val angleRad: Float,
-        val confidence: Float
+    data class DetectionBox(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+        val confidence: Float,
+        val classId: Int
     )
 
-    private fun runOnDeviceObbPipeline(
+    private fun runOnDeviceCocoPipeline(
         invVpMatrix: FloatArray,
         anchor: Anchor,
         camAngle: Float,
@@ -428,14 +420,11 @@ class MainActivity : AppCompatActivity() {
                     Thread {
                         val interpreter = tfliteInterpreter
                         if (interpreter != null) {
-                            val detection = runTfliteInference(bitmap, interpreter)
-                            if (detection != null) {
-                                projectObbToArPlane(detection, invVpMatrix, anchor, camAngle, frame, sWidth, sHeight)
+                            val box = runCocoInference(bitmap, interpreter)
+                            if (box != null) {
+                                projectCocoBoxAndOrient(bitmap, box, invVpMatrix, anchor, camAngle, frame, sWidth, sHeight)
                                 return@Thread
                             }
-                        } else {
-                            logDebug("⚠️ Interpreter is null: model file not loaded")
-                            showDebugDialog()
                         }
                     }.start()
                 }
@@ -444,9 +433,9 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun runTfliteInference(bitmap: Bitmap, interpreter: Interpreter): ObbDetection? {
+    private fun runCocoInference(bitmap: Bitmap, interpreter: Interpreter): DetectionBox? {
         try {
-            logDebug("Running inference on ${bitmap.width}x${bitmap.height} frame...")
+            logDebug("Running COCO inference on ${bitmap.width}x${bitmap.height} frame...")
             val scaledBmp = Bitmap.createScaledBitmap(bitmap, modelInputSize, modelInputSize, true)
             val inputBuffer = ByteBuffer.allocateDirect(1 * modelInputSize * modelInputSize * 3 * 4).apply {
                 order(ByteOrder.nativeOrder())
@@ -466,15 +455,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             val outputShape = interpreter.getOutputTensor(0).shape()
-            logDebug("Tensor output shape: ${outputShape.contentToString()}")
-
             val dim1 = outputShape[1]
             val dim2 = outputShape[2]
             val isChannelsFirst = dim1 < dim2
             val channels = if (isChannelsFirst) dim1 else dim2
             val numBoxes = if (isChannelsFirst) dim2 else dim1
 
-            logDebug("Channels: $channels, Boxes: $numBoxes, ChannelsFirst: $isChannelsFirst")
+            logDebug("COCO Out: ${outputShape.contentToString()} | Channels: $channels, Boxes: $numBoxes")
 
             val outputBuffer = if (isChannelsFirst) {
                 Array(1) { Array(channels) { FloatArray(numBoxes) } }
@@ -484,12 +471,13 @@ class MainActivity : AppCompatActivity() {
 
             interpreter.run(inputBuffer, outputBuffer)
 
-            var maxConfFound = 0f
-            var bestDetection: ObbDetection? = null
+            var bestBox: DetectionBox? = null
+            var highestScore = 0f
 
             for (i in 0 until numBoxes) {
-                val cx: Float; val cy: Float; val w: Float; val h: Float; val angle: Float
-                var maxClassScore = 0f
+                val cx: Float; val cy: Float; val w: Float; val h: Float
+                var maxClass = 0f
+                var bestClassIdx = 0
 
                 if (isChannelsFirst) {
                     @Suppress("UNCHECKED_CAST")
@@ -498,11 +486,13 @@ class MainActivity : AppCompatActivity() {
                     cy = buf[0][1][i] / modelInputSize
                     w = buf[0][2][i] / modelInputSize
                     h = buf[0][3][i] / modelInputSize
-                    for (c in 4 until channels - 1) {
+                    for (c in 4 until channels) {
                         val score = buf[0][c][i]
-                        if (score > maxClassScore) maxClassScore = score
+                        if (score > maxClass) {
+                            maxClass = score
+                            bestClassIdx = c - 4
+                        }
                     }
-                    angle = buf[0][channels - 1][i]
                 } else {
                     @Suppress("UNCHECKED_CAST")
                     val buf = outputBuffer as Array<Array<FloatArray>>
@@ -510,41 +500,48 @@ class MainActivity : AppCompatActivity() {
                     cy = buf[0][i][1] / modelInputSize
                     w = buf[0][i][2] / modelInputSize
                     h = buf[0][i][3] / modelInputSize
-                    for (c in 4 until channels - 1) {
+                    for (c in 4 until channels) {
                         val score = buf[0][i][c]
-                        if (score > maxClassScore) maxClassScore = score
+                        if (score > maxClass) {
+                            maxClass = score
+                            bestClassIdx = c - 4
+                        }
                     }
-                    angle = buf[0][i][channels - 1]
                 }
 
-                if (maxClassScore > maxConfFound) maxConfFound = maxClassScore
+                if (maxClass > highestScore) highestScore = maxClass
 
-                if (maxClassScore > 0.20f) {
+                // Confidence threshold for target object
+                if (maxClass > 0.35f) {
                     val distToCenter = sqrt((cx - 0.5f) * (cx - 0.5f) + (cy - 0.5f) * (cy - 0.5f))
                     if (distToCenter < 0.38f) {
-                        bestDetection = ObbDetection(cx, cy, w, h, angle, maxClassScore)
+                        val l = (cx - w / 2f).coerceIn(0f, 1f)
+                        val t = (cy - h / 2f).coerceIn(0f, 1f)
+                        val r = (cx + w / 2f).coerceIn(0f, 1f)
+                        val b = (cy + h / 2f).coerceIn(0f, 1f)
+                        bestBox = DetectionBox(l, t, r, b, maxClass, bestClassIdx)
                     }
                 }
             }
 
-            logDebug("Inference complete. Max confidence: ${String.format(Locale.US, "%.3f", maxConfFound)}")
-            if (bestDetection == null) {
-                logDebug("⚠️ No detection passed threshold (>0.20)")
+            logDebug("COCO Inference complete. Highest Score: ${String.format(Locale.US, "%.3f", highestScore)}")
+            if (bestBox == null) {
+                logDebug("⚠️ No object detected above 0.35 threshold")
                 showDebugDialog()
             } else {
-                logDebug("✓ Detection accepted: conf=${String.format(Locale.US, "%.2f", bestDetection.confidence)}, angle=${bestDetection.angleRad}")
+                logDebug("✓ Detected COCO class $bestBox.classId with confidence ${String.format(Locale.US, "%.2f", bestBox.confidence)}")
             }
-
-            return bestDetection
+            return bestBox
         } catch (e: Exception) {
-            logDebug("❌ Inference Exception: ${e.javaClass.simpleName}: ${e.message}\n${e.stackTraceToString().take(250)}")
+            logDebug("❌ Inference Exception: ${e.javaClass.simpleName}: ${e.message}")
             showDebugDialog()
             return null
         }
     }
 
-    private fun projectObbToArPlane(
-        detection: ObbDetection,
+    private fun projectCocoBoxAndOrient(
+        fullBmp: Bitmap,
+        box: DetectionBox,
         invVpMatrix: FloatArray,
         anchor: Anchor,
         camAngle: Float,
@@ -556,42 +553,87 @@ class MainActivity : AppCompatActivity() {
         val invAnchor = anchorPose.inverse()
         val planeY = anchorPose.ty()
 
-        val screenCX = detection.cx * sWidth
-        val screenCY = detection.cy * sHeight
-        val cosA = cos(detection.angleRad)
-        val sinA = sin(detection.angleRad)
+        val leftPx = (box.left * sWidth).toInt().coerceIn(0, sWidth - 1)
+        val topPx = (box.top * sHeight).toInt().coerceIn(0, sHeight - 1)
+        val rightPx = (box.right * sWidth).toInt().coerceIn(leftPx + 4, sWidth)
+        val botPx = (box.bottom * sHeight).toInt().coerceIn(topPx + 4, sHeight)
+        val cropW = rightPx - leftPx
+        val cropH = botPx - topPx
 
-        val halfW = (detection.width * sWidth) * 0.5f
-        val halfH = (detection.height * sHeight) * 0.5f
+        // 1. Calculate isolated object orientation strictly INSIDE the detected box (ignores background couch stripes)
+        val cropBmp = Bitmap.createBitmap(fullBmp, leftPx, topPx, cropW, cropH)
+        var sumX = 0.0; var sumY = 0.0; var count = 0
+        val fgX = mutableListOf<Int>()
+        val fgY = mutableListOf<Int>()
 
-        val pMajorScreenX = screenCX + halfW * cosA
-        val pMajorScreenY = screenCY + halfW * sinA
-        val pMinorScreenX = screenCX - halfH * sinA
-        val pMinorScreenY = screenCY + halfH * cosA
+        // Estimate local asset vs background contrast inside the bounding box
+        val borderSample = cropBmp.getPixel(2, 2)
+        val bgR = Color.red(borderSample)
+        val bgG = Color.green(borderSample)
+        val bgB = Color.blue(borderSample)
 
-        val centerWorld = intersectScreenRayWithHorizontalPlane(screenCX, screenCY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
-        val majorWorld = intersectScreenRayWithHorizontalPlane(pMajorScreenX, pMajorScreenY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
-        val minorWorld = intersectScreenRayWithHorizontalPlane(pMinorScreenX, pMinorScreenY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        for (y in 2 until cropH - 2 step 3) {
+            for (x in 2 until cropW - 2 step 3) {
+                val px = cropBmp.getPixel(x, y)
+                val diff = sqrt(
+                    ((Color.red(px) - bgR) * (Color.red(px) - bgR) +
+                     (Color.green(px) - bgG) * (Color.green(px) - bgG) +
+                     (Color.blue(px) - bgB) * (Color.blue(px) - bgB)).toDouble()
+                )
+                if (diff > 25.0) {
+                    sumX += x; sumY += y
+                    fgX.add(x); fgY.add(y)
+                    count++
+                }
+            }
+        }
 
-        if (centerWorld == null || majorWorld == null || minorWorld == null) {
-            logDebug("Ray projection returned null (rays outside plane)")
+        var localTheta = 0f
+        if (count > 20) {
+            val cX = sumX / count
+            val cY = sumY / count
+            var mu20 = 0.0; var mu02 = 0.0; var mu11 = 0.0
+            for (i in 0 until count) {
+                val dx = fgX[i] - cX
+                val dy = fgY[i] - cY
+                mu20 += dx * dx
+                mu02 += dy * dy
+                mu11 += dx * dy
+            }
+            localTheta = (0.5 * atan2(2.0 * mu11, mu20 - mu02)).toFloat()
+        }
+
+        // 2. Project 2D bounding extents to 3D ARCore tabletop plane
+        val midX = (leftPx + rightPx) / 2f
+        val midY = (topPx + botPx) / 2f
+
+        val cosT = cos(localTheta)
+        val sinT = sin(localTheta)
+        val halfW = cropW * 0.5f
+        val halfH = cropH * 0.5f
+
+        val pA = intersectScreenRayWithHorizontalPlane(midX, midY, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val pMajor = intersectScreenRayWithHorizontalPlane(midX + halfW * cosT, midY + halfW * sinT, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+        val pMinor = intersectScreenRayWithHorizontalPlane(midX - halfH * sinT, midY + halfH * cosT, sWidth.toFloat(), sHeight.toFloat(), invVpMatrix, planeY)
+
+        if (pA == null || pMajor == null || pMinor == null) {
+            logDebug("Plane ray projection outside valid bounds")
             return
         }
 
-        val localCenter = invAnchor.transformPoint(centerWorld)
-        val localMajor = invAnchor.transformPoint(majorWorld)
-        val localMinor = invAnchor.transformPoint(minorWorld)
+        val lCenter = invAnchor.transformPoint(pA)
+        val lMajor = invAnchor.transformPoint(pMajor)
+        val lMinor = invAnchor.transformPoint(pMinor)
 
-        val dMajorX = localMajor[0] - localCenter[0]
-        val dMajorZ = localMajor[2] - localCenter[2]
-        val metricMajor = sqrt(dMajorX * dMajorX + dMajorZ * dMajorZ) * 2f
+        val dMajX = lMajor[0] - lCenter[0]
+        val dMajZ = lMajor[2] - lCenter[2]
+        val metricMajor = sqrt(dMajX * dMajX + dMajZ * dMajZ) * 2f
 
-        val dMinorX = localMinor[0] - localCenter[0]
-        val dMinorZ = localMinor[2] - localCenter[2]
-        val metricMinor = sqrt(dMinorX * dMinorX + dMinorZ * dMinorZ) * 2f
+        val dMinX = lMinor[0] - lCenter[0]
+        val dMinZ = lMinor[2] - lCenter[2]
+        val metricMinor = sqrt(dMinX * dMinX + dMinZ * dMinZ) * 2f
 
-        val axisAngle = atan2(dMajorX, dMajorZ)
-
+        val axisAngle = atan2(dMajX, dMajZ)
         val candidates = floatArrayOf(
             axisAngle,
             axisAngle + (Math.PI / 2.0).toFloat(),
@@ -602,7 +644,6 @@ class MainActivity : AppCompatActivity() {
         var bestAngle = candidates[0]
         var maxDot = -Float.MAX_VALUE
         var bestIdx = 0
-
         for (idx in candidates.indices) {
             val ang = candidates[idx]
             val dot = cos(ang - camAngle)
@@ -615,7 +656,6 @@ class MainActivity : AppCompatActivity() {
 
         val finalWidth: Float
         val finalDepth: Float
-
         if (bestIdx == 0 || bestIdx == 2) {
             finalDepth = metricMajor.coerceIn(0.06f, 0.45f)
             finalWidth = metricMinor.coerceIn(0.05f, 0.35f)
@@ -624,6 +664,7 @@ class MainActivity : AppCompatActivity() {
             finalWidth = metricMajor.coerceIn(0.05f, 0.35f)
         }
 
+        // 3. Measure Height via Point Cloud
         var measuredHeight = 0f
         try {
             val pc = frame.acquirePointCloud()
@@ -649,7 +690,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {}
 
         if (measuredHeight <= 0.01f) {
-            measuredHeight = (min(finalWidth, finalDepth) * 0.42f).coerceIn(0.035f, 0.12f)
+            measuredHeight = (min(finalWidth, finalDepth) * 0.38f).coerceIn(0.03f, 0.12f)
         }
 
         runOnUiThread {
@@ -668,7 +709,7 @@ class MainActivity : AppCompatActivity() {
             logDebug("✓ Locked Box: ${wCm}x${dCm}x${hCm}cm | Heading: ${yawDeg}°")
             Toast.makeText(
                 this@MainActivity,
-                "✓ OBB Locked: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
+                "✓ COCO Locked: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -1174,7 +1215,6 @@ class MainActivity : AppCompatActivity() {
             val activeRed = Color.parseColor("#F85149")
             val capturedGreen = Color.parseColor("#3FB950")
 
-            // Lower Tier
             for (sector in 0 until 4) {
                 val facetIdx = sector * 2
                 val isCaptured = capturedThumbnails.containsKey(facetIdx)
@@ -1188,7 +1228,6 @@ class MainActivity : AppCompatActivity() {
                 drawFilletedCornerSector(canvas, sector, baseLoop, midLoop, 0f, hMid, anchorPose, screenW, screenH, greyColor, false)
             }
 
-            // Upper Tier
             for (sector in 0 until 4) {
                 drawFilletedWallSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, greyColor, false)
 
@@ -1203,7 +1242,6 @@ class MainActivity : AppCompatActivity() {
                 drawFilletedCornerSector(canvas, sector, midLoop, topLoop, hMid, prismHeight, anchorPose, screenW, screenH, chamferColor, true)
             }
 
-            // Top Cap
             val isTopCaptured = capturedThumbnails.containsKey(8)
             val isTopActiveStep = currentStepIdx == 8
             val topColor = when {
@@ -1213,7 +1251,6 @@ class MainActivity : AppCompatActivity() {
             }
             drawTopCap(canvas, topLoop, prismHeight, anchorPose, screenW, screenH, topColor, true)
 
-            // Reticle
             if (currentStepIdx < sequence.size) {
                 val desc = getFacetDescriptor(currentStepIdx)
                 val faceCenterWorld = localToWorld(desc.centerX, desc.centerY, desc.centerZ, anchorPose)
