@@ -19,6 +19,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
+import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
 import okhttp3.*
@@ -200,7 +201,7 @@ class MainActivity : AppCompatActivity() {
         btnScaleUp.setOnClickListener { scalePrism(1.08f) }
         btnScaleDown.setOnClickListener { scalePrism(0.92f) }
 
-        // Tap HUD scale readout or target badge to view real-time diagnostics
+        // Tap HUD indicators to view real-time logs
         scaleReadout.setOnClickListener { showDebugDialog() }
         valScale.setOnClickListener { showDebugDialog() }
         targetBadge.setOnClickListener { showDebugDialog() }
@@ -406,10 +407,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     data class DetectionBox(
-        val left: Float,
-        val top: Float,
-        val right: Float,
-        val bottom: Float,
+        val leftPx: Float,
+        val topPx: Float,
+        val rightPx: Float,
+        val bottomPx: Float,
         val confidence: Float,
         val classId: Int
     )
@@ -448,8 +449,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun runCocoInference(bitmap: Bitmap, interpreter: Interpreter): DetectionBox? {
         try {
-            logDebug("Running COCO inference on ${bitmap.width}x${bitmap.height} frame...")
-            val scaledBmp = Bitmap.createScaledBitmap(bitmap, modelInputSize, modelInputSize, true)
+            logDebug("Running aspect-corrected inference on ${bitmap.width}x${bitmap.height} frame...")
+
+            // 1. Aspect-Preserving 1:1 Center Crop: Eliminates non-uniform vertical compression
+            val minDim = min(bitmap.width, bitmap.height)
+            val cropX = (bitmap.width - minDim) / 2f
+            val cropY = (bitmap.height - minDim) / 2f
+            val squareBmp = Bitmap.createBitmap(bitmap, cropX.toInt(), cropY.toInt(), minDim, minDim)
+            val scaledBmp = Bitmap.createScaledBitmap(squareBmp, modelInputSize, modelInputSize, true)
+
             val inputBuffer = ByteBuffer.allocateDirect(1 * modelInputSize * modelInputSize * 3 * 4).apply {
                 order(ByteOrder.nativeOrder())
             }
@@ -486,19 +494,21 @@ class MainActivity : AppCompatActivity() {
 
             var bestBox: DetectionBox? = null
             var highestScore = 0f
+            val screenCenterX = bitmap.width / 2f
+            val screenCenterY = bitmap.height / 2f
 
             for (i in 0 until numBoxes) {
-                val cx: Float; val cy: Float; val w: Float; val h: Float
+                val cxNorm: Float; val cyNorm: Float; val wNorm: Float; val hNorm: Float
                 var maxClass = 0f
                 var bestClassIdx = 0
 
                 if (isChannelsFirst) {
                     @Suppress("UNCHECKED_CAST")
                     val buf = outputBuffer as Array<Array<FloatArray>>
-                    cx = buf[0][0][i] / modelInputSize
-                    cy = buf[0][1][i] / modelInputSize
-                    w = buf[0][2][i] / modelInputSize
-                    h = buf[0][3][i] / modelInputSize
+                    cxNorm = buf[0][0][i] / modelInputSize
+                    cyNorm = buf[0][1][i] / modelInputSize
+                    wNorm = buf[0][2][i] / modelInputSize
+                    hNorm = buf[0][3][i] / modelInputSize
                     for (c in 4 until channels) {
                         val score = buf[0][c][i]
                         if (score > maxClass) {
@@ -509,10 +519,10 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     @Suppress("UNCHECKED_CAST")
                     val buf = outputBuffer as Array<Array<FloatArray>>
-                    cx = buf[0][i][0] / modelInputSize
-                    cy = buf[0][i][1] / modelInputSize
-                    w = buf[0][i][2] / modelInputSize
-                    h = buf[0][i][3] / modelInputSize
+                    cxNorm = buf[0][i][0] / modelInputSize
+                    cyNorm = buf[0][i][1] / modelInputSize
+                    wNorm = buf[0][i][2] / modelInputSize
+                    hNorm = buf[0][i][3] / modelInputSize
                     for (c in 4 until channels) {
                         val score = buf[0][i][c]
                         if (score > maxClass) {
@@ -524,14 +534,22 @@ class MainActivity : AppCompatActivity() {
 
                 if (maxClass > highestScore) highestScore = maxClass
 
-                // Generalized confidence threshold across all e-commerce categories
-                if (maxClass > 0.28f) {
-                    val distToCenter = sqrt((cx - 0.5f) * (cx - 0.5f) + (cy - 0.5f) * (cy - 0.5f))
-                    if (distToCenter < 0.40f) {
-                        val l = (cx - w / 2f).coerceIn(0f, 1f)
-                        val t = (cy - h / 2f).coerceIn(0f, 1f)
-                        val r = (cx + w / 2f).coerceIn(0f, 1f)
-                        val b = (cy + h / 2f).coerceIn(0f, 1f)
+                // Map square coordinates back to full camera viewport space
+                val boxWPx = wNorm * minDim
+                val boxHPx = hNorm * minDim
+                val boxCXPx = cropX + cxNorm * minDim
+                val boxCYPx = cropY + cyNorm * minDim
+
+                if (maxClass > 0.25f) {
+                    val distNorm = sqrt(
+                        ((boxCXPx - screenCenterX) / minDim).pow(2) +
+                        ((boxCYPx - screenCenterY) / minDim).pow(2)
+                    )
+                    if (distNorm < 0.45f) {
+                        val l = (boxCXPx - boxWPx / 2f).coerceIn(0f, bitmap.width.toFloat() - 1f)
+                        val t = (boxCYPx - boxHPx / 2f).coerceIn(0f, bitmap.height.toFloat() - 1f)
+                        val r = (boxCXPx + boxWPx / 2f).coerceIn(l + 8f, bitmap.width.toFloat())
+                        val b = (boxCYPx + boxHPx / 2f).coerceIn(t + 8f, bitmap.height.toFloat())
                         bestBox = DetectionBox(l, t, r, b, maxClass, bestClassIdx)
                     }
                 }
@@ -539,10 +557,10 @@ class MainActivity : AppCompatActivity() {
 
             logDebug("COCO Max Score: ${String.format(Locale.US, "%.3f", highestScore)}")
             if (bestBox == null) {
-                logDebug("⚠️ No object detected above 0.28 threshold")
+                logDebug("⚠️ No object detected above 0.25 threshold")
                 showDebugDialog()
             } else {
-                logDebug("✓ Detected COCO class ${bestBox.classId} with conf ${String.format(Locale.US, "%.2f", bestBox.confidence)}")
+                logDebug("✓ Detected class ${bestBox.classId} with conf ${String.format(Locale.US, "%.2f", bestBox.confidence)}")
             }
             return bestBox
         } catch (e: Exception) {
@@ -553,8 +571,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Universal 3D Table-Plane Fitting & Alignment.
-     * Works agnostically across any asset shape (long, wide, square, circular, diagonal).
+     * Universal 3D Table-Plane Fitting, Center Re-Anchoring & Alignment.
+     * Prevents bounding box drift when orbiting behind the object.
      */
     private fun projectCocoBoxAndOrient(
         fullBmp: Bitmap,
@@ -570,14 +588,14 @@ class MainActivity : AppCompatActivity() {
         val invAnchor = anchorPose.inverse()
         val planeY = anchorPose.ty()
 
-        val leftPx = (box.left * sWidth).toInt().coerceIn(0, sWidth - 1)
-        val topPx = (box.top * sHeight).toInt().coerceIn(0, sHeight - 1)
-        val rightPx = (box.right * sWidth).toInt().coerceIn(leftPx + 8, sWidth)
-        val botPx = (box.bottom * sHeight).toInt().coerceIn(topPx + 8, sHeight)
+        val leftPx = box.leftPx.toInt().coerceIn(0, sWidth - 1)
+        val topPx = box.topPx.toInt().coerceIn(0, sHeight - 1)
+        val rightPx = box.rightPx.toInt().coerceIn(leftPx + 8, sWidth)
+        val botPx = box.bottomPx.toInt().coerceIn(topPx + 8, sHeight)
         val cropW = rightPx - leftPx
         val cropH = botPx - topPx
 
-        // 1. Isolate the object contour strictly INSIDE the detected YOLO box (cuts out background patterns)
+        // 1. Isolate the object contour strictly INSIDE the detected YOLO crop
         val cropBmp = Bitmap.createBitmap(fullBmp, leftPx, topPx, cropW, cropH)
 
         val cTL = cropBmp.getPixel(2, 2)
@@ -611,7 +629,6 @@ class MainActivity : AppCompatActivity() {
         val barX = if (count > 20) (sumX / count).toFloat() else cropW / 2f
         val barY = if (count > 20) (sumY / count).toFloat() else cropH / 2f
 
-        // Compute 2D principal axis of the isolated object silhouette
         var theta2D = if (cropH > cropW) (Math.PI / 2.0).toFloat() else 0f
         if (count > 30) {
             var mu20 = 0.0; var mu02 = 0.0; var mu11 = 0.0
@@ -683,9 +700,7 @@ class MainActivity : AppCompatActivity() {
         val u2X = v2X / span2
         val u2Z = v2Z / span2
 
-        // 4. Universal Canonical Normal Selection:
-        // Evaluates all 4 physical edge normals of the asset footprint to determine which
-        // face directly addresses the user's camera viewpoint.
+        // 4. Universal Canonical Normal Selection: Selects closest camera-facing normal
         val camDirX = sin(camAngle)
         val camDirZ = cos(camAngle)
 
@@ -763,6 +778,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         runOnUiThread {
+            // 6. Center Re-Anchoring: Pin anchor directly to the physical 3D center of the object
+            try {
+                val session = sceneView.session
+                if (session != null) {
+                    prismAnchor?.detach()
+                    val oldRot = anchorPose.rotationQuaternion
+                    val newCenterPose = Pose(
+                        floatArrayOf(pCenterWorld[0], planeY, pCenterWorld[2]),
+                        oldRot
+                    )
+                    prismAnchor = session.createAnchor(newCenterPose)
+                }
+            } catch (e: Exception) {
+                logDebug("Re-anchor failed: ${e.message}")
+            }
+
             initialAzimuth = headingAngle
             prismWidth = finalWidth
             prismDepth = finalDepth
@@ -775,10 +806,10 @@ class MainActivity : AppCompatActivity() {
             val dCm = (prismDepth * 100).roundToInt()
             val hCm = (prismHeight * 100).roundToInt()
             val yawDeg = Math.toDegrees(headingAngle.toDouble()).roundToInt()
-            logDebug("✓ Universal Fit: ${wCm}x${dCm}x${hCm}cm | Heading: ${yawDeg}°")
+            logDebug("✓ Re-anchored to Center: ${wCm}x${dCm}x${hCm}cm | Heading: ${yawDeg}°")
             Toast.makeText(
                 this@MainActivity,
-                "✓ Auto-Fit: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
+                "✓ Locked & Centered: ${wCm}×${dCm}×${hCm}cm | Heading: ${yawDeg}°",
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -1112,12 +1143,12 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(x * c + z * s, y, -x * s + z * c)
     }
 
-    private fun localToWorld(lx: Float, ly: Float, lz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
+    private fun localToWorld(lx: Float, ly: Float, lz: Float, anchorPose: Pose): FloatArray {
         val rotated = rotateByAzimuth(lx, ly, lz)
         return anchorPose.transformPoint(rotated)
     }
 
-    private fun normalToWorld(nx: Float, ny: Float, nz: Float, anchorPose: com.google.ar.core.Pose): FloatArray {
+    private fun normalToWorld(nx: Float, ny: Float, nz: Float, anchorPose: Pose): FloatArray {
         val rotated = rotateByAzimuth(nx, ny, nz)
         return anchorPose.rotateVector(rotated)
     }
@@ -1368,7 +1399,7 @@ class MainActivity : AppCompatActivity() {
             canvas: Canvas, sector: Int,
             base: List<FloatArray>, top: List<FloatArray>,
             y0: Float, y1: Float,
-            anchorPose: com.google.ar.core.Pose,
+            anchorPose: Pose,
             w: Float, h: Float, color: Int, isActive: Boolean
         ) {
             val i0 = sector * 6
@@ -1399,7 +1430,7 @@ class MainActivity : AppCompatActivity() {
             canvas: Canvas, corner: Int,
             base: List<FloatArray>, top: List<FloatArray>,
             y0: Float, y1: Float,
-            anchorPose: com.google.ar.core.Pose,
+            anchorPose: Pose,
             w: Float, h: Float, color: Int, isActive: Boolean
         ) {
             val startIdx = corner * 6 + 1
@@ -1433,7 +1464,7 @@ class MainActivity : AppCompatActivity() {
 
         private fun drawTopCap(
             canvas: Canvas, top: List<FloatArray>, y: Float,
-            anchorPose: com.google.ar.core.Pose,
+            anchorPose: Pose,
             w: Float, h: Float, color: Int, fill: Boolean
         ) {
             val pts = top.map { projectPoint(localToWorld(it[0], y, it[2], anchorPose), w, h) }
@@ -1461,7 +1492,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        private fun drawPlanar3DReticle(canvas: Canvas, desc: FacetDesc, anchorPose: com.google.ar.core.Pose, w: Float, h: Float) {
+        private fun drawPlanar3DReticle(canvas: Canvas, desc: FacetDesc, anchorPose: Pose, w: Float, h: Float) {
             val rColor = if (isAligned) Color.parseColor("#3FB950") else Color.parseColor("#F85149")
             reticlePaint.color = rColor
             fillReticlePaint.color = rColor
